@@ -4,8 +4,6 @@ A terminal-based disk usage explorer and cleanup tool. Find what fills your disk
 
 Inspired by [disktree](https://github.com/tobi/disktree), a treemap-based disk analyzer for the desktop. disktree-tui brings the same workflow to the terminal, making it accessible over SSH and on headless machines.
 
-![disktree-tui: a directory tree rendered as a treemap with colored tiles](https://raw.githubusercontent.com/mguffin68/disktree-tui/refs/heads/master/assets/screenshot.png)
-
 ## Install
 
 ### From source
