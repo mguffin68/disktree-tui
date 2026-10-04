@@ -1,0 +1,13 @@
+[package]
+name = "disktree-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal disk usage explorer and cleanup tool"
+license = "MIT"
+
+[dependencies]
+disktree-tui-core = { path = "../disktree-tui-core" }
+clap = { version = "4", features = ["derive"] }
+
+[lints]
+workspace = true

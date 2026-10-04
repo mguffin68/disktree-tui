@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/disktree-tui-core",
+    "crates/disktree-tui-app",
+]
+resolver = "3"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+cast_lossless = "allow"        # narrowing is intentional in FFI / platform code
+cast_possible_truncation = "allow"  # checked with >= / < guards
+cast_possible_wrap = "allow"       # platform size conversions
+cast_precision_loss = "allow"      # f64 math for layout is sufficient precision
+cast_sign_loss = "allow"           # checked with guards
+map_unwrap_or = "allow"            # no better alternative in simple cases
+match_same_arms = "allow"          # intentional symmetry
+missing_errors_doc = "allow"       # derived from core lib conventions
+missing_panics_doc = "allow"       # derived from core lib conventions
+module_name_repetitions = "allow"  # follows naming convention of upstream disktree
+must_use_candidate = "allow"       # not every item needs MustUse
+needless_raw_string_hashes = "allow" # readability for multiline strings
+needless_raw_strings = "allow"     # readability for multiline strings
+return_self_not_must_use = "allow" # internal builder types, not public API
+struct_excessive_bools = "allow"   # config structs naturally have many bools
+too_many_lines = "allow"           # render functions naturally grow
+too_many_arguments = "allow"       # readability > arbitrary limits
+
+[workspace.lints.rust]
+missing_docs = "allow" # documentation will be added in later milestones
