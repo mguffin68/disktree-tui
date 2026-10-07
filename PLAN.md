@@ -104,21 +104,21 @@
 
 ### Tasks
 
-- [ ] Implement `layout::squarified` in `disktree-tui-core`:
-  - [ ] Input: flat list of leaf directories with sizes, available width/height
-  - [ ] Output: rectangle assignment (x, y, width, height) per directory
-  - [ ] Recursive subdivision by rows or columns for best aspect ratio
-  - [ ] Handle terminal resize (recompute layout)
-  - [ ] Handle case where terminal is too small (< 40 columns)
-- [ ] Implement depth rendering: only render nodes up to `--depth` N
-  - [ ] Nodes beyond depth N aggregate into a single "overflow" tile
-- [ ] Write unit tests:
-  - [ ] Two equal children → two equal-width columns
-  - [ ] Three children with 50/25/25 split → correct proportions
-  - [ ] Single child → fills entire area
-  - [ ] Overflow handling → unrendered nodes aggregate correctly
-  - [ ] Aspect ratio reasonableness (no tile narrower than 2 cells)
-  - [ ] Resize: layout recomputes with new dimensions
+- [x] Implement squarified layout in `disktree-tui-core` (`layout::layout`; squarifies in visual units since cells are ~2:1, snaps shared edges so tiles cover the area exactly):
+  - [x] Input: a `DirNode` subtree, area, and options (weight = size or file count, depth limit, minimum tile size)
+  - [x] Output: tiles in pre-order — directories, a directory's own files, and overflow — each with a rect; subdivided tiles carry a one-row label band and the inner area
+  - [x] Recursive subdivision by rows or columns for best aspect ratio
+  - [x] Handle terminal resize (recompute layout)
+  - [x] Handle case where terminal is too small (< 40 columns or < 4 rows: `too_small`, no tiles; M4 falls back to the tree view)
+- [x] Implement depth rendering: only render nodes up to `--depth` N
+  - [x] Nodes beyond depth N aggregate into their depth-N directory tile, drawn whole; siblings too small to draw merge into one "N more" overflow tile that always stays visible
+- [x] Write unit tests:
+  - [x] Two equal children → two equal-width columns
+  - [x] Three children with 50/25/25 split → correct proportions
+  - [x] Single child → fills entire area
+  - [x] Overflow handling → unrendered nodes aggregate correctly
+  - [x] Aspect ratio reasonableness (no tile narrower than 2 cells)
+  - [x] Resize: layout recomputes with new dimensions
 
 ### Acceptance Criteria
 
