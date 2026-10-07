@@ -1,5 +1,6 @@
 //! Directory tree data structure.
 
+use std::cmp::Reverse;
 use std::path::PathBuf;
 
 /// A node in the directory tree.
@@ -15,12 +16,16 @@ pub struct DirNode {
     pub depth: usize,
     /// Basename for display.
     pub name: String,
-    /// Last write time (Unix timestamp), if available.
+    /// Newest modification time of this directory or anything under it
+    /// (Unix timestamp), if available.
     pub last_write: Option<u64>,
     /// Classified data kind.
     pub class: super::classify::Class,
     /// Whether this directory contains reclaimable space.
     pub reclaimable: bool,
+    /// The directory (or something under it) could not be read, so `size`
+    /// and `file_count` are lower bounds.
+    pub unreadable: bool,
     /// Child directories (non-leaf nodes only).
     pub children: Vec<Box<DirNode>>,
 }
@@ -37,13 +42,79 @@ impl DirNode {
             last_write: None,
             class: super::classify::Class::Unknown,
             reclaimable: false,
+            unreadable: false,
             children: Vec::new(),
         }
     }
 
-    /// Sort children by size, descending.
+    /// Sort children by size, descending (ties broken by name).
     pub fn sort_children(&mut self) {
-        self.children.sort_unstable_by_key(|a| a.size);
-        self.children.reverse();
+        self.children
+            .sort_by(|a, b| (Reverse(a.size), &a.name).cmp(&(Reverse(b.size), &b.name)));
+    }
+
+    /// Sort children at every level of the subtree.
+    pub fn sort_recursive(&mut self) {
+        self.sort_children();
+        for child in &mut self.children {
+            child.sort_recursive();
+        }
+    }
+
+    /// Fold a finished child's totals into this node and attach it.
+    pub fn absorb_child(&mut self, child: DirNode) {
+        self.absorb_totals(&child);
+        self.children.push(Box::new(child));
+    }
+
+    /// Fold another node's totals into this node without attaching it.
+    pub fn absorb_totals(&mut self, other: &DirNode) {
+        self.size += other.size;
+        self.file_count += other.file_count;
+        self.last_write = self.last_write.max(other.last_write);
+        self.unreadable |= other.unreadable;
+    }
+}
+
+/// Format a byte count with binary units, e.g. `1.5 GiB`.
+pub fn format_size(bytes: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.1} {}", UNITS[unit])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_size_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1536), "1.5 KiB");
+        assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GiB");
+    }
+
+    #[test]
+    fn sort_children_largest_first() {
+        let mut root = DirNode::new("/r".into(), "r".into(), 0);
+        for (name, size) in [("a", 10), ("b", 30), ("c", 20)] {
+            let mut child = DirNode::new(format!("/r/{name}").into(), name.into(), 1);
+            child.size = size;
+            root.absorb_child(child);
+        }
+        root.sort_children();
+        let names: Vec<_> = root.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["b", "c", "a"]);
+        assert_eq!(root.size, 60);
     }
 }

@@ -6,14 +6,14 @@
 
 ### Tasks
 
-- [ ] Initialize Cargo workspace with two crates: `disktree-tui-core`, `disktree-tui-app`
-- [ ] Set up `Cargo.toml`, `rust-toolchain.toml`, `rustfmt.toml`
-- [ ] Create `Makefile` with `run`, `test`, `lint`, `ci`, `release` targets
-- [ ] Configure clippy pedantic with documented allow exceptions
-- [ ] Set up GitHub Actions for CI (lint + test on Linux, macOS, Windows)
-- [ ] Define module structure for both crates (empty modules, compile to verify)
-- [ ] Implement CLI argument parsing with `clap` (`--disk`, `--apparent`, `--no-hidden`, `--depth`, `--mode`, `--scan-only`)
-- [ ] Write integration test that runs binary with various argument combinations
+- [x] Initialize Cargo workspace with two crates: `disktree-tui-core`, `disktree-tui-app`
+- [x] Set up `Cargo.toml`, `rust-toolchain.toml`, `rustfmt.toml`
+- [x] Create `Makefile` with `run`, `test`, `lint`, `ci`, `release` targets
+- [x] Configure clippy pedantic with documented allow exceptions
+- [x] Set up GitHub Actions for CI (lint + test on Linux, macOS, Windows)
+- [x] Define module structure for both crates (empty modules, compile to verify)
+- [x] Implement CLI argument parsing with `clap` (`--disk`, `--apparent`, `--no-hidden`, `--depth`, `--mode`, `--scan-only`)
+- [x] Write integration test that runs binary with various argument combinations
 
 ### Acceptance Criteria
 
@@ -29,29 +29,30 @@
 
 ### Tasks
 
-- [ ] Implement `scan::Scanner` in `disktree-tui-core`:
-  - [ ] Recursive directory walking using `walkdir`
-  - [ ] Disk usage aggregation (`st_blocks * 512` for regular files)
-  - [ ] Apparent size mode (file metadata length)
-  - [ ] Hardlink deduplication (track inodes, count once)
-  - [ ] Symlink detection (do not follow, skip broken)
-  - [ ] Hidden file filtering (include by default, respect `--no-hidden`)
-  - [ ] Depth limiting (stop at `--depth` N)
-  - [ ] Async scanning with `tokio` scope
-  - [ ] Cancellation via `Esc` (signal or atomic flag)
-- [ ] Implement `tree::DirNode` data structure:
-  - [ ] Stores size, file count, depth, name, children list
-  - [ ] Bottom-up aggregation (size computed when last child completes)
-  - [ ] Unreadable directory tracking (count as unknown, don't crash)
-- [ ] Implement scan caching for widening (memoize results keyed by path)
-- [ ] Write unit tests:
-  - [ ] Simple directory → correct total size
-  - [ ] Hardlinked files → counted once
-  - [ ] Symlinks → not followed
-  - [ ] Hidden files → included by default, excluded with flag
-  - [ ] Depth limit → correct pruning
-  - [ ] Unreadable directory → counted, not crashed
-  - [ ] Large directory → completes within time budget
+- [x] Implement `scan::Scanner` in `disktree-tui-core`:
+  - [x] Recursive directory walking (own explicit-stack walker; `walkdir` stats mounts before filtering and its `filter_entry` + `same_file_system` combination dropped siblings)
+  - [x] Disk usage aggregation (`st_blocks * 512` for regular files)
+  - [x] Apparent size mode (file metadata length)
+  - [x] Hardlink deduplication (track inodes, count once)
+  - [x] Symlink detection (do not follow, skip broken; a link's own blocks count in disk-usage mode, matching `du`)
+  - [x] Stay on the root's filesystem: skip nested mounts by path (Linux mountinfo) before any `stat`, then by device id
+  - [x] Hidden file filtering (include by default, respect `--no-hidden`)
+  - [x] Depth limiting (stop at `--depth` N)
+  - [ ] Async scanning with `tokio` scope — scanner is synchronous; the app runs it via `spawn_blocking` (M4)
+  - [ ] Cancellation via `Esc` (signal or atomic flag) — `Scanner::cancel_flag()`; `Esc` binding lands in M5
+- [x] Implement `tree::DirNode` data structure:
+  - [x] Stores size, file count, depth, name, children list
+  - [x] Bottom-up aggregation (size computed when last child completes)
+  - [x] Unreadable directory tracking (count as unknown, don't crash)
+- [ ] Implement scan caching for widening (memoize results keyed by path) — deferred to M5 alongside the widening UI; key must include `apparent` + `skip_hidden`
+- [x] Write unit tests:
+  - [x] Simple directory → correct total size
+  - [x] Hardlinked files → counted once
+  - [x] Symlinks → not followed
+  - [x] Hidden files → included by default, excluded with flag
+  - [x] Depth limit → correct pruning (deeper nodes fold into their nearest kept ancestor; totals unchanged)
+  - [x] Unreadable directory → counted, not crashed
+  - [x] Large directory → completes within time budget
 
 ### Acceptance Criteria
 
