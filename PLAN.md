@@ -69,25 +69,25 @@
 
 ### Tasks
 
-- [ ] Implement `classify::Classifier` in `disktree-tui-core`:
-  - [ ] Pattern matching on directory names (case-insensitive)
-  - [ ] Class enums: Code, Caches, Build, Git, Media, Documents, Toolchains, Synced, Agent, Unknown
-  - [ ] Shape-based classification (bare git repo, `target` beside `Cargo.toml`, `node_modules`, etc.)
-  - [ ] Configurable class names/colors via config file
-- [ ] Implement `classify::is_reclaimable`:
-  - [ ] Detect caches (`~/.cache`, `__pycache__`, browser caches)
-  - [ ] Detect build output (`target/`, `build/`, `dist/`, `.dart_tool/`)
-  - [ ] Detect package stores (`pacman/pkg/`, `apt/archives/`, `pip/cache/`, `nuget/`)
-  - [ ] Detect sync history/old versions
-  - [ ] Detect temporary files (`/tmp`, `/var/tmp`, `Temp/`)
-  - [ ] Reclaimable is independent of class — a `target/` that is classified as Build is also reclaimable
-- [ ] Wire classification into `DirNode` (each node carries class + reclaimable flag)
-- [ ] Write unit tests:
-  - [ ] `~/.cache` → Caches + reclaimable
-  - [ ] `target/` beside `Cargo.toml` → Build + reclaimable
-  - [ ] `src/` → Code (not reclaimable)
-  - [ ] `Downloads/` → Documents (not reclaimable)
-  - [ ] Unknown directory → Unknown (not reclaimable)
+- [x] Implement classification in `disktree-tui-core` (`classify::classify_tree`, run by the scanner):
+  - [x] Pattern matching on directory names (case-insensitive)
+  - [x] Class enums: Code, Caches, Build, Git, Media, Documents, Toolchains, Synced, Agent, Unknown
+  - [x] Shape-based classification (bare git repo, `target` beside `Cargo.toml`, `node_modules`, etc.) — scanner records marker files per directory (before hidden filtering); `CACHEDIR.TAG` honored; root context derived from its ancestors on disk
+  - [ ] Configurable class names/colors via config file — `Class` is serde-(de)serializable (lowercase) so `[colors]` keys parse; colors belong to `ui::Theme` (M4) and the config file (M7)
+- [x] Implement reclaimable detection (part of `classify_tree`; protected trees — container storage, snapshots — are never reclaimable):
+  - [x] Detect caches (`~/.cache`, `__pycache__`, browser caches)
+  - [x] Detect build output (`target/`, `build/`, `dist/`, `.dart_tool/`)
+  - [x] Detect package stores (`pacman/pkg/`, `apt/archives/`, `pip/cache/`, `nuget/`)
+  - [x] Detect sync history/old versions
+  - [x] Detect temporary files (`/tmp`, `/var/tmp`, `Temp/`)
+  - [x] Reclaimable is independent of class — a `target/` that is classified as Build is also reclaimable (`node_modules` beside `package.json` is Toolchains + reclaimable; generic `cache`/`tmp` names are not reclaimable inside Code)
+- [x] Wire classification into `DirNode` (each node carries class + reclaimable flag)
+- [x] Write unit tests:
+  - [x] `~/.cache` → Caches + reclaimable
+  - [x] `target/` beside `Cargo.toml` → Build + reclaimable
+  - [x] `src/` → Code (not reclaimable)
+  - [x] `Downloads/` → Documents (not reclaimable)
+  - [x] Unknown directory → Unknown (not reclaimable)
 
 ### Acceptance Criteria
 

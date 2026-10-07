@@ -111,6 +111,7 @@ fn scan_only_prints_summary() {
     assert!(stdout.contains("3 files"), "{stdout}");
     assert!(stdout.contains("big/"), "{stdout}");
     assert!(stdout.contains("small/"), "{stdout}");
+    assert!(stdout.contains("reclaimable: "), "{stdout}");
     // Default summary depth is 1.
     assert!(!stdout.contains("inner/"), "{stdout}");
     // Largest directory listed first.
@@ -123,6 +124,24 @@ fn scan_only_respects_depth_and_hidden() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("inner/"), "{stdout}");
     assert!(stdout.contains("2 files"), "{stdout}");
+}
+
+#[test]
+fn scan_only_shows_class_labels() {
+    let tmp = TempDir::new().unwrap();
+    let proj = tmp.path().join("proj");
+    std::fs::create_dir_all(proj.join("target/debug")).unwrap();
+    std::fs::write(proj.join("Cargo.toml"), b"").unwrap();
+    std::fs::write(proj.join("target/debug/app"), vec![0u8; 2048]).unwrap();
+
+    // The class itself depends on where the temp dir lives (under `/tmp` it
+    // inherits Caches; classify.rs tests the rules), but `target/` beside a
+    // Cargo.toml is reclaimable either way.
+    let output = run(&["--scan-only", "--apparent", proj.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let target_line = stdout.lines().find(|l| l.contains("target/")).unwrap();
+    assert!(target_line.ends_with(", reclaimable]"), "{stdout}");
+    assert!(stdout.contains("reclaimable: 2.0 KiB"), "{stdout}");
 }
 
 #[test]

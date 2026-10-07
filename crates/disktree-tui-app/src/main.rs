@@ -1,11 +1,12 @@
 //! CLI argument parsing.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
 use disktree_tui_core::platform;
-use disktree_tui_core::scan::{self, ScanConfig};
+use disktree_tui_core::scan::{self, ScanConfig, ScanResult};
 use disktree_tui_core::tree::{DirNode, format_size};
 
 /// disktree-tui: Terminal disk usage explorer and cleanup tool.
@@ -102,13 +103,7 @@ fn scan_only(args: &CliArgs) -> ExitCode {
     }
 
     let root = args.directory.clone().unwrap_or_else(platform::home_dir);
-    let config = ScanConfig {
-        apparent_size: args.apparent,
-        skip_hidden: args.no_hidden,
-        // Without --depth, summarize the top level only.
-        max_depth: Some(args.depth.unwrap_or(1)),
-        whole_disk: false,
-    };
+    let config = scan_only_config(args);
 
     let result = match scan::scan(&root, &config) {
         Ok(result) => result,
@@ -118,45 +113,94 @@ fn scan_only(args: &CliArgs) -> ExitCode {
         }
     };
 
-    let size_kind = if args.apparent {
-        "apparent"
-    } else {
-        "disk usage"
-    };
-    println!(
-        "{}  {} ({size_kind})  {} files  {} dirs",
+    // Without --depth, summarize the top level only.
+    let depth = args.depth.unwrap_or(1);
+    match print_summary(&mut io::stdout().lock(), &result, args.apparent, depth) {
+        Ok(()) => ExitCode::SUCCESS,
+        // Output piped into `head` and closed early: not an error.
+        Err(err) if err.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("disktree-tui: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn scan_only_config(args: &CliArgs) -> ScanConfig {
+    ScanConfig {
+        apparent_size: args.apparent,
+        skip_hidden: args.no_hidden,
+        // Keep the full tree so the reclaimable total sees nested caches and
+        // build output at any depth; --depth only limits what is printed.
+        max_depth: None,
+        whole_disk: false,
+    }
+}
+
+fn print_summary(
+    out: &mut impl Write,
+    result: &ScanResult,
+    apparent: bool,
+    depth: usize,
+) -> io::Result<()> {
+    let size_kind = if apparent { "apparent" } else { "disk usage" };
+    writeln!(
+        out,
+        "{}  {} ({size_kind})  {} files  {} dirs  {}",
         result.root.path.display(),
         format_size(result.root.size),
         result.file_count,
         result.dir_count,
-    );
-    print_children(&result.root);
+        class_tag(&result.root),
+    )?;
+    writeln!(
+        out,
+        "reclaimable: {}",
+        format_size(result.root.reclaimable_size())
+    )?;
+    print_children(out, &result.root, depth)?;
     for mount in &result.skipped_mounts {
-        println!(
+        writeln!(
+            out,
             "skipped mount point (other filesystem): {}",
             mount.display()
-        );
+        )?;
     }
     if result.unreadable > 0 {
-        println!(
+        writeln!(
+            out,
             "{} entries could not be read; sizes marked ! are lower bounds",
             result.unreadable
-        );
+        )?;
     }
-    ExitCode::SUCCESS
+    Ok(())
 }
 
-fn print_children(node: &DirNode) {
+/// `[Class]`, or `[Class, reclaimable]`.
+fn class_tag(node: &DirNode) -> String {
+    if node.reclaimable {
+        format!("[{}, reclaimable]", node.class.label())
+    } else {
+        format!("[{}]", node.class.label())
+    }
+}
+
+fn print_children(out: &mut impl Write, node: &DirNode, max_depth: usize) -> io::Result<()> {
+    if node.depth >= max_depth {
+        return Ok(());
+    }
     let indent = "  ".repeat(node.depth + 1);
     for child in node.children.iter().take(SUMMARY_CHILDREN) {
-        println!(
-            "{indent}{:>10}{} {:>9} files  {}/",
+        writeln!(
+            out,
+            "{indent}{:>10}{} {:>9} files  {}/  {}",
             format_size(child.size),
             if child.unreadable { "!" } else { " " },
             child.file_count,
             child.name,
-        );
-        print_children(child);
+            class_tag(child),
+        )?;
+        print_children(out, child, max_depth)?;
     }
     let hidden = node.children.len().saturating_sub(SUMMARY_CHILDREN);
     if hidden > 0 {
@@ -164,6 +208,20 @@ fn print_children(node: &DirNode) {
             .iter()
             .map(|c| c.size)
             .sum();
-        println!("{indent}{:>10}  ({hidden} more)", format_size(rest));
+        writeln!(out, "{indent}{:>10}  ({hidden} more)", format_size(rest))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_only_scans_full_depth_regardless_of_depth_flag() {
+        let args = CliArgs::parse_from(["disktree-tui", "--scan-only", "-D", "1", "--apparent"]);
+        let config = scan_only_config(&args);
+        assert_eq!(config.max_depth, None);
+        assert!(config.apparent_size);
     }
 }

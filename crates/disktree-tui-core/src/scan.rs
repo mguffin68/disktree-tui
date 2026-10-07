@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::watch;
 
+use crate::classify::{self, Markers};
 use crate::platform;
 use crate::tree::DirNode;
 
@@ -43,7 +44,10 @@ pub struct ScanConfig {
     /// never skipped.
     pub skip_hidden: bool,
     /// Deepest level that gets its own node (None = unlimited). Anything deeper
-    /// is still measured and counted toward its nearest kept ancestor.
+    /// is still measured and counted toward its nearest kept ancestor, but is
+    /// not classified on its own, so reclaimable directories below the limit
+    /// are invisible to [`DirNode::reclaimable_size`]. Callers that need
+    /// reclaimable totals should scan unlimited and limit drawing instead.
     pub max_depth: Option<usize>,
     /// Use the whole disk for scanning.
     pub whole_disk: bool,
@@ -167,6 +171,11 @@ impl Scanner {
             visited += 1;
 
             let name = entry.file_name();
+            // Markers are recorded before filtering, so `--no-hidden` still
+            // sees `.git` when classifying.
+            if let Some(node) = frame.node.as_mut() {
+                node.markers |= Markers::from_entry_name(&name);
+            }
             if self.config.skip_hidden && name.to_string_lossy().starts_with('.') {
                 continue;
             }
@@ -253,6 +262,7 @@ impl Scanner {
             finished_root = pop_frame(&mut stack, max_depth);
         }
         let mut root_node = finished_root.expect("root frame is popped last");
+        classify::classify_tree(&mut root_node);
         root_node.sort_recursive();
         skipped_mounts.sort();
         skipped_mounts.dedup();
@@ -629,6 +639,51 @@ mod tests {
         assert_eq!(names, ["z", "a"]);
         assert_eq!(result.root.size, 3);
         assert_eq!(result.skipped_mounts, [tmp.path().join("m")]);
+    }
+
+    #[test]
+    fn scanned_tree_is_classified() {
+        use crate::classify::{Class, classify_detached};
+        let tmp = TempDir::new().unwrap();
+        let proj = tmp.path().join("proj");
+        write(&proj.join("Cargo.toml"), 10);
+        write(&proj.join("src/main.rs"), 10);
+        write(&proj.join("target/debug/app"), 1000);
+        write(&proj.join(".git/HEAD"), 10);
+        write(&tmp.path().join(".cache/thing"), 300);
+        write(&tmp.path().join("Downloads/file.iso"), 50);
+        write(&tmp.path().join("web/package.json"), 10);
+        write(&tmp.path().join("web/node_modules/pkg/package.json"), 10);
+        write(&tmp.path().join("web/node_modules/pkg/dist/index.js"), 200);
+
+        // Hidden filtering must not hide `.git` from the project-root rule.
+        let config = ScanConfig {
+            skip_hidden: true,
+            ..apparent()
+        };
+        let mut root = scan(tmp.path(), &config).unwrap().root;
+        classify_detached(&mut root);
+        let proj = child(&root, "proj");
+        assert_eq!(proj.class, Class::Code);
+        assert_eq!(child(proj, "src").class, Class::Code);
+        let target = child(proj, "target");
+        assert_eq!((target.class, target.reclaimable), (Class::Build, true));
+        assert_eq!(child(target, "debug").class, Class::Build);
+        assert_eq!(child(&root, "Downloads").class, Class::Documents);
+        let modules = child(child(&root, "web"), "node_modules");
+        assert_eq!(
+            (modules.class, modules.reclaimable),
+            (Class::Toolchains, true)
+        );
+        let dist = child(child(modules, "pkg"), "dist");
+        assert_eq!(dist.class, Class::Toolchains);
+        assert_eq!(root.reclaimable_size(), 1210);
+
+        let mut all = scan(tmp.path(), &apparent()).unwrap().root;
+        classify_detached(&mut all);
+        let cache = child(&all, ".cache");
+        assert_eq!((cache.class, cache.reclaimable), (Class::Caches, true));
+        assert_eq!(child(child(&all, "proj"), ".git").class, Class::Git);
     }
 
     #[test]

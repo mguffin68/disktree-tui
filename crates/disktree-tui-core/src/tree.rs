@@ -21,8 +21,11 @@ pub struct DirNode {
     pub last_write: Option<u64>,
     /// Classified data kind.
     pub class: super::classify::Class,
-    /// Whether this directory contains reclaimable space.
+    /// Whether this whole directory is reclaimable (cache, build output,
+    /// package store, temp), independent of its class.
     pub reclaimable: bool,
+    /// Marker files this directory directly contains, used for classification.
+    pub markers: super::classify::Markers,
     /// The directory (or something under it) could not be read, so `size`
     /// and `file_count` are lower bounds.
     pub unreadable: bool,
@@ -42,6 +45,7 @@ impl DirNode {
             last_write: None,
             class: super::classify::Class::Unknown,
             reclaimable: false,
+            markers: super::classify::Markers::NONE,
             unreadable: false,
             children: Vec::new(),
         }
@@ -58,6 +62,16 @@ impl DirNode {
         self.sort_children();
         for child in &mut self.children {
             child.sort_recursive();
+        }
+    }
+
+    /// Bytes in reclaimable directories at or below this node, each counted
+    /// once at its outermost reclaimable directory.
+    pub fn reclaimable_size(&self) -> u64 {
+        if self.reclaimable {
+            self.size
+        } else {
+            self.children.iter().map(|c| c.reclaimable_size()).sum()
         }
     }
 
@@ -116,5 +130,22 @@ mod tests {
         let names: Vec<_> = root.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["b", "c", "a"]);
         assert_eq!(root.size, 60);
+    }
+
+    #[test]
+    fn reclaimable_size_counts_outermost_only() {
+        let mut root = DirNode::new("/r".into(), "r".into(), 0);
+        let mut cache = DirNode::new("/r/cache".into(), "cache".into(), 1);
+        cache.reclaimable = true;
+        let mut inner = DirNode::new("/r/cache/x".into(), "x".into(), 2);
+        inner.reclaimable = true;
+        inner.size = 40;
+        cache.absorb_child(inner);
+        cache.size += 10;
+        let mut code = DirNode::new("/r/code".into(), "code".into(), 1);
+        code.size = 500;
+        root.absorb_child(cache);
+        root.absorb_child(code);
+        assert_eq!(root.reclaimable_size(), 50);
     }
 }
