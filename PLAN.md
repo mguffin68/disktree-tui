@@ -177,7 +177,7 @@
 - [ ] Implement navigation in `app.rs`:
   - [ ] Enter directory (deep at any depth)
   - [ ] Go up one level (Esc/Backspace)
-  - [ ] Back/forward history (`Alt+Left` / `Alt+Right`, `[` / `]`)
+  - [ ] Back/forward history (`Alt+Left` / `Alt+Right`; `[` / `]` are depth control)
   - [ ] Move selection between tiles at current level (arrow keys)
   - [ ] Tab → next largest sibling
   - [ ] Selection tracking (which directory is "selected")
@@ -196,7 +196,7 @@
   - [ ] `Ctrl+D` / `G` — scan whole disk
   - [ ] `D` — toggle disk usage / apparent size
   - [ ] `I` — toggle hidden files
-  - [ ] `[` / `]` — depth control
+  - [ ] `[` / `]` — depth control: wire to `layout::DrawDepth::shallower` / `deeper` (default 2 levels, `--depth` sets the start)
   - [ ] `T` — cycle mode (size → apparent → file count → age)
 - [ ] Implement `classify::age_color`:
   - [ ] Last write time → color gradient (this week = bright → older = muted)

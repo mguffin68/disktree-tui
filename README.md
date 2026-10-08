@@ -112,7 +112,7 @@ Press **T** to cycle: **Size** → **Apparent** → **File count** → **Age**. 
 | `I` | Toggle hidden files |
 | `R` / `F5` | Rescan |
 | `/` | Name filter |
-| `[` / `]` | Depth control |
+| `[` / `]` | Draw depth: shallower / deeper (default 2 levels, up to unlimited) |
 | `V` | Volume picker |
 | `Ctrl+O` | Choose scan directory |
 | `G` / `--disk` | Scan whole disk |
@@ -129,7 +129,7 @@ Create `~/.config/disktree-tui/config.toml`:
 mode = "size"           # "size", "files", "age"
 apparent = false
 hidden = true
-depth = null            # null = unlimited
+depth = 2               # levels drawn; "all" = unlimited
 
 [colors]
 code = "blue"

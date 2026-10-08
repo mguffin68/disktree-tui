@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
+use disktree_tui_core::layout::DrawDepth;
 use disktree_tui_core::platform;
 use disktree_tui_core::scan::{self, ScanConfig, ScanResult};
 use disktree_tui_core::tree::{DirNode, format_size};
@@ -29,9 +30,10 @@ pub struct CliArgs {
     #[arg(short = 'H', long)]
     pub no_hidden: bool,
 
-    /// Maximum draw depth (unlimited by default).
-    #[arg(short = 'D', long)]
-    pub depth: Option<usize>,
+    /// Treemap draw depth: levels below the view, or "all" [default: 2;
+    /// change with [ and ]]. With --scan-only: levels printed [default: 1].
+    #[arg(short = 'D', long, value_name = "LEVELS")]
+    pub depth: Option<DrawDepth>,
 
     /// What to visualize: size, files, or age.
     #[arg(short, long, default_value = "size")]
@@ -114,7 +116,9 @@ fn scan_only(args: &CliArgs) -> ExitCode {
     };
 
     // Without --depth, summarize the top level only.
-    let depth = args.depth.unwrap_or(1);
+    let depth = args
+        .depth
+        .map_or(1, |d| d.max_depth().unwrap_or(usize::MAX));
     match print_summary(&mut io::stdout().lock(), &result, args.apparent, depth) {
         Ok(()) => ExitCode::SUCCESS,
         // Output piped into `head` and closed early: not an error.
@@ -223,5 +227,14 @@ mod tests {
         let config = scan_only_config(&args);
         assert_eq!(config.max_depth, None);
         assert!(config.apparent_size);
+    }
+
+    #[test]
+    fn depth_flag_accepts_levels_and_all() {
+        let parse = |v: &str| CliArgs::try_parse_from(["disktree-tui", "-D", v]).map(|a| a.depth);
+        assert_eq!(parse("3").unwrap(), Some(DrawDepth::Levels(3)));
+        assert_eq!(parse("all").unwrap(), Some(DrawDepth::Unlimited));
+        assert!(parse("0").is_err());
+        assert_eq!(CliArgs::parse_from(["disktree-tui"]).depth, None);
     }
 }

@@ -64,6 +64,86 @@ impl Rect {
     }
 }
 
+/// How many nesting levels the treemap draws below the view root.
+///
+/// Defaults to [`DrawDepth::DEFAULT`] levels: deeper views of a real home
+/// directory turn into a mosaic of unreadable tiles. `[` and `]` step it via
+/// [`shallower`](Self::shallower) and [`deeper`](Self::deeper).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawDepth {
+    /// Draw this many levels (at least 1).
+    Levels(usize),
+    /// Draw as deep as space allows.
+    Unlimited,
+}
+
+impl DrawDepth {
+    /// The starting depth.
+    pub const DEFAULT: Self = Self::Levels(2);
+
+    /// The depth limit to pass to [`LayoutOptions::max_depth`].
+    pub fn max_depth(self) -> Option<usize> {
+        match self {
+            Self::Levels(n) => Some(n),
+            Self::Unlimited => None,
+        }
+    }
+
+    /// One level deeper. `tree_height` is the view root's
+    /// [`DirNode::height`]: stepping past it becomes `Unlimited`, so the user
+    /// never presses `]` without anything changing.
+    #[must_use]
+    pub fn deeper(self, tree_height: usize) -> Self {
+        match self {
+            Self::Levels(n) if n + 1 < tree_height => Self::Levels(n + 1),
+            _ => Self::Unlimited,
+        }
+    }
+
+    /// One level shallower, never below 1. From `Unlimited` it steps to one
+    /// level above the deepest the tree has, so the change is visible.
+    #[must_use]
+    pub fn shallower(self, tree_height: usize) -> Self {
+        match self {
+            Self::Levels(n) => Self::Levels(n.saturating_sub(1).max(1)),
+            Self::Unlimited => Self::Levels(tree_height.saturating_sub(1).max(1)),
+        }
+    }
+}
+
+impl Default for DrawDepth {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+impl std::fmt::Display for DrawDepth {
+    /// `2`, or `∞` when unlimited (for the `[depth:…]` indicator).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Levels(n) => write!(f, "{n}"),
+            Self::Unlimited => f.write_str("∞"),
+        }
+    }
+}
+
+impl std::str::FromStr for DrawDepth {
+    type Err = String;
+
+    /// A positive number of levels, or `all` for unlimited.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "all" | "unlimited" | "inf" => Ok(Self::Unlimited),
+            n => match n.parse::<usize>() {
+                Ok(0) | Err(_) => Err(format!(
+                    "invalid depth: {s} (expected a positive number or \"all\")"
+                )),
+                Ok(levels) => Ok(Self::Levels(levels)),
+            },
+        }
+    }
+}
+
 /// What tile area is proportional to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Weight {
@@ -89,6 +169,7 @@ pub struct LayoutOptions {
     /// What tile area is proportional to.
     pub weight: Weight,
     /// Nesting levels to draw below the view root (None = as deep as fits).
+    /// Defaults to [`DrawDepth::DEFAULT`].
     /// Directories at the last level are drawn whole, their contents
     /// aggregated into the one tile.
     pub max_depth: Option<usize>,
@@ -102,7 +183,7 @@ impl Default for LayoutOptions {
     fn default() -> Self {
         Self {
             weight: Weight::Size,
-            max_depth: None,
+            max_depth: DrawDepth::DEFAULT.max_depth(),
             min_width: 2,
             min_height: 1,
         }
@@ -681,6 +762,48 @@ mod tests {
         let l = layout(&root, AREA, &options);
         assert!(l.tiles.iter().all(|t| t.depth <= 2));
         assert_eq!(l.tiles.iter().filter(|t| t.depth == 2).count(), 1);
+    }
+
+    #[test]
+    fn default_draw_depth_is_two_levels() {
+        assert_eq!(DrawDepth::default(), DrawDepth::Levels(2));
+        assert_eq!(LayoutOptions::default().max_depth, Some(2));
+
+        let deep = node(
+            "a",
+            0,
+            vec![node("b", 0, vec![leaf("c", 10), leaf("d", 10)])],
+        );
+        let root = node("r", 0, vec![deep]);
+        let l = layout(&root, AREA, &LayoutOptions::default());
+        assert_eq!(l.tiles.iter().map(|t| t.depth).max(), Some(2));
+    }
+
+    #[test]
+    fn draw_depth_steps() {
+        use DrawDepth::{Levels, Unlimited};
+        // Tree 5 levels deep.
+        assert_eq!(Levels(2).deeper(5), Levels(3));
+        assert_eq!(Levels(4).deeper(5), Unlimited);
+        assert_eq!(Unlimited.deeper(5), Unlimited);
+        assert_eq!(Unlimited.shallower(5), Levels(4));
+        assert_eq!(Levels(2).shallower(5), Levels(1));
+        assert_eq!(Levels(1).shallower(5), Levels(1));
+        // Shallow trees: `]` reaches unlimited immediately.
+        assert_eq!(Levels(2).deeper(1), Unlimited);
+        assert_eq!(Unlimited.shallower(0), Levels(1));
+        assert_eq!(Levels(3).max_depth(), Some(3));
+        assert_eq!(Unlimited.max_depth(), None);
+    }
+
+    #[test]
+    fn draw_depth_parses_and_displays() {
+        assert_eq!("3".parse::<DrawDepth>(), Ok(DrawDepth::Levels(3)));
+        assert_eq!("all".parse::<DrawDepth>(), Ok(DrawDepth::Unlimited));
+        assert!("0".parse::<DrawDepth>().is_err());
+        assert!("x".parse::<DrawDepth>().is_err());
+        assert_eq!(DrawDepth::Levels(2).to_string(), "2");
+        assert_eq!(DrawDepth::Unlimited.to_string(), "∞");
     }
 
     #[test]

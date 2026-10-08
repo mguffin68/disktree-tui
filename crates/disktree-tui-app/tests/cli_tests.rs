@@ -145,6 +145,19 @@ fn scan_only_shows_class_labels() {
 }
 
 #[test]
+fn scan_only_depth_all_prints_every_level() {
+    let output = scan_fixture(&["--apparent", "-D", "all"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("inner/"));
+}
+
+#[test]
+fn help_documents_default_depth() {
+    let stdout = String::from_utf8_lossy(&run(&["--help"]).stdout).into_owned();
+    assert!(stdout.contains("default: 2"), "{stdout}");
+}
+
+#[test]
 fn scan_only_missing_directory_fails() {
     let tmp = TempDir::new().unwrap();
     let missing = tmp.path().join("missing");

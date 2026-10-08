@@ -75,6 +75,15 @@ impl DirNode {
         }
     }
 
+    /// Levels of directories below this node (0 when it has no children).
+    pub fn height(&self) -> usize {
+        self.children
+            .iter()
+            .map(|c| c.height() + 1)
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Fold a finished child's totals into this node and attach it.
     pub fn absorb_child(&mut self, child: DirNode) {
         self.absorb_totals(&child);
@@ -130,6 +139,17 @@ mod tests {
         let names: Vec<_> = root.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["b", "c", "a"]);
         assert_eq!(root.size, 60);
+    }
+
+    #[test]
+    fn height_counts_levels_below() {
+        let mut root = DirNode::new("/r".into(), "r".into(), 0);
+        assert_eq!(root.height(), 0);
+        let mut a = DirNode::new("/r/a".into(), "a".into(), 1);
+        a.absorb_child(DirNode::new("/r/a/b".into(), "b".into(), 2));
+        root.absorb_child(a);
+        root.absorb_child(DirNode::new("/r/c".into(), "c".into(), 1));
+        assert_eq!(root.height(), 2);
     }
 
     #[test]

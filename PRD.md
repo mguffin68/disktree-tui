@@ -144,10 +144,10 @@ A terminal-based disk usage explorer and cleanup tool inspired by [disktree](htt
 |--------|------|
 | Open selected directory | `Enter` |
 | Go up one level | `Esc`, `Backspace` |
-| Back / forward | `Alt+Left` / `Alt+Right`, `[` / `]` |
+| Back / forward | `Alt+Left` / `Alt+Right` |
 | Move selection between tiles | `Arrow keys` |
 | Next largest sibling | `Tab` |
-| Depth control | `[` / `]` |
+| Depth control (default 2 levels; steps up to unlimited) | `[` / `]` |
 | Name filter | `/` then type, `Enter` to filter, `Esc` to clear |
 | Choose scan directory | `Ctrl+O` |
 | Rescan | `R` / `F5` |
@@ -378,7 +378,7 @@ Options:
   -d, --disk                Scan the disk containing the target
   -a, --apparent            Use apparent size instead of disk usage
   -H, --no-hidden           Skip hidden files and directories
-  -D, --depth <LEVEL>       Maximum draw depth (default: unlimited)
+  -D, --depth <LEVELS>      Draw depth, or "all" (default: 2; [ and ] change it)
   -m, --mode <MODE>         What to visualize: size|files|age (default: size)
   -v, --volume              Pick a volume to scan (alias for pressing V in TUI)
   -s, --scan-only           Scan and print summary, then exit (no TUI)
@@ -403,7 +403,7 @@ apparent = false       # false = disk usage, true = apparent size
 hidden = true
 
 # Default depth limit
-depth = null           # null = unlimited
+depth = 2              # levels drawn; "all" = unlimited
 
 # Color theme
 theme = "auto"         # "auto", "dark", "light", "dim"
@@ -428,7 +428,7 @@ unknown = "dark_gray"
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  / > home > user > .cache                    [size] [hidden] [depth:∞] │
+│  / > home > user > .cache                    [size] [hidden] [depth:2] │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  Scan: 45.2 GB (312K files)   │  Legend: ╔════════════╗  │ Disk:       │
 │                                  │  Code     │ ████████ │  Free: 128 GB │
