@@ -1,14 +1,25 @@
-//! CLI argument parsing.
+//! disktree-tui: CLI entry point and terminal event loop.
+
+mod app;
+mod tree_view;
+mod treemap_view;
+mod ui;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use std::time::Duration;
+
+use clap::Parser;
 use disktree_tui_core::layout::DrawDepth;
 use disktree_tui_core::platform;
 use disktree_tui_core::scan::{self, ScanConfig, ScanResult};
 use disktree_tui_core::tree::{DirNode, format_size};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+
+use crate::app::{App, ViewSettings};
+use crate::ui::{ColorDepth, Theme};
 
 /// disktree-tui: Terminal disk usage explorer and cleanup tool.
 #[derive(Debug, Parser)]
@@ -91,10 +102,62 @@ fn main() -> ExitCode {
         return scan_only(&args);
     }
 
-    // In non-scan-only mode, show help (full TUI comes in M4+).
-    CliArgs::command().print_help().ok();
-    println!();
-    ExitCode::SUCCESS
+    if args.disk {
+        eprintln!("disktree-tui: --disk is not supported yet");
+        return ExitCode::FAILURE;
+    }
+    match run_tui(&args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("disktree-tui: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Show the treemap until the user quits. Display only for now: `q`, `Esc`
+/// or `Ctrl+C` quit, and a resize redraws.
+fn run_tui(args: &CliArgs) -> io::Result<()> {
+    let root = args.directory.clone().unwrap_or_else(platform::home_dir);
+    let settings = ViewSettings {
+        mode: args.mode,
+        apparent: args.apparent,
+        show_hidden: !args.no_hidden,
+        depth: args.depth.unwrap_or_default(),
+    };
+    let theme = Theme::new(ColorDepth::detect());
+    let mut app = App::start(root, settings);
+
+    let mut terminal = ratatui::try_init()?;
+    let result = event_loop(&mut terminal, &mut app, theme);
+    ratatui::restore();
+    app.cancel_scan();
+    result
+}
+
+fn event_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    theme: Theme,
+) -> io::Result<()> {
+    loop {
+        app.poll_scan();
+        terminal.draw(|frame| ui::render(frame, app, theme))?;
+        // Poll briefly so scan progress keeps updating; resizes simply fall
+        // through to the next draw.
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            let ctrl_c =
+                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+            if ctrl_c || matches!(key.code, KeyCode::Char('q' | 'Q') | KeyCode::Esc) {
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// Scan the target, print a text summary, and exit.

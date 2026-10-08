@@ -327,6 +327,15 @@ fn layout_children<'a>(
             let inner = Rect::new(rect.x, rect.y + 1, rect.width, rect.height - 1);
             tiles[index].inner = Some(inner);
             layout_children(node, inner, depth + 1, options, tiles);
+            // If no subdirectory earned a tile of its own (only the files
+            // tile and an overflow), the split adds nothing: draw it whole.
+            let any_dir = tiles[index + 1..]
+                .iter()
+                .any(|t| t.depth == depth + 1 && matches!(t.kind, TileKind::Dir(_)));
+            if !any_dir {
+                tiles.truncate(index + 1);
+                tiles[index].inner = None;
+            }
         }
     }
 }
@@ -732,6 +741,17 @@ mod tests {
             0,
             vec![node("a", 500, vec![leaf("empty", 0)]), leaf("b", 400)],
         );
+        let l = layout(&root, AREA, &LayoutOptions::default());
+        let a = l.tiles.iter().find(|t| name(t) == "a").unwrap();
+        assert!(a.inner.is_none());
+        assert_eq!(l.tiles.len(), 2);
+    }
+
+    #[test]
+    fn subdivision_without_any_drawable_subdir_is_undone() {
+        // `a` is almost all loose files; its subdirs are too small to draw.
+        let tiny = (0..20).map(|i| leaf(&format!("t{i}"), 1)).collect();
+        let root = node("r", 0, vec![node("a", 1_000_000, tiny), leaf("b", 900_000)]);
         let l = layout(&root, AREA, &LayoutOptions::default());
         let a = l.tiles.iter().find(|t| name(t) == "a").unwrap();
         assert!(a.inner.is_none());

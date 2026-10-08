@@ -29,3 +29,33 @@ pub fn list_volumes() -> Vec<Volume> {
         total_bytes: 0,
     }]
 }
+
+/// Space on the filesystem holding a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskSpace {
+    /// Bytes available to unprivileged users.
+    pub available: u64,
+    /// Total size of the filesystem.
+    pub total: u64,
+}
+
+/// Free and total space of the filesystem containing `path`.
+pub fn disk_space(path: &std::path::Path) -> std::io::Result<DiskSpace> {
+    let stats = fs4::statvfs(path)?;
+    Ok(DiskSpace {
+        available: stats.available_space(),
+        total: stats.total_space(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_space_of_temp_dir() {
+        let space = disk_space(&std::env::temp_dir()).unwrap();
+        assert!(space.total > 0);
+        assert!(space.available <= space.total);
+    }
+}

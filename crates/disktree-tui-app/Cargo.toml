@@ -8,6 +8,8 @@ license = "MIT"
 [dependencies]
 disktree-tui-core = { path = "../disktree-tui-core" }
 clap = { version = "4", features = ["derive"] }
+ratatui = "0.30.2"
+tokio = { version = "1.53.2", default-features = false, features = ["sync"] }
 
 [lints]
 workspace = true

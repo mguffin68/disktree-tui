@@ -135,28 +135,28 @@
 
 ### Tasks
 
-- [ ] Implement `ui::App` state machine in `disktree-tui-app`:
-  - [ ] States: Scanning, Ready, FilterInput, VolumePicker, Review, Error
-  - [ ] Current state tracking, state transitions
-- [ ] Implement `treemap_view::render` in `disktree-tui-app`:
-  - [ ] Top bar: breadcrumb trail, mode indicators (size/files/age, hidden, apparent, depth)
-  - [ ] Main area: ASCII treemap with ratatui Widgets
-    - [ ] Unicode box-drawing borders between tiles
-    - [ ] Filled tiles using `█` (U+2588)
-    - [ ] Hatched reclaimable tiles using `╡` / `╢` overlays
-    - [ ] Color tiles by class (detect 256-color vs true-color terminal)
-    - [ ] Labels below or inside tiles when space permits
-    - [ ] Selection highlight using reverse video or bright borders
-  - [ ] Side panel (right): legend, disk info, marked list, actions
-  - [ ] Bottom bar: selected tile info (path, size, files, last write)
-  - [ ] Legend: class → color mapping + hatch meaning
-- [ ] Implement tree view fallback (indented list) when terminal < 80 cols or treemap not feasible
-- [ ] Implement `ui::Theme`:
-  - [ ] Color palette per class (as specified in PRD)
-  - [ ] 8-color fallback (mono + labels)
-  - [ ] Theme config option
-- [ ] Handle terminal resize (SIGWINCH → redraw)
-- [ ] Write render validation tests (compare rendered frames to expected output)
+- [x] Implement `ui::App` state machine in `disktree-tui-app`:
+  - [x] States: Scanning, Ready, Error (`app::State`; FilterInput, VolumePicker and Review arrive with M5/M6, which need them)
+  - [x] Current state tracking, state transitions (scan runs on a background thread with live progress; `q`/`Esc`/`Ctrl+C` quit)
+- [x] Implement `treemap_view::render` in `disktree-tui-app`:
+  - [x] Top bar: breadcrumb trail, mode indicators (size/files/age, hidden, apparent, depth)
+  - [x] Main area: ASCII treemap with ratatui Widgets
+    - [x] Unicode box-drawing borders between tiles (a thin `▏` on each tile's left edge plus the darker label band, which costs no layout space)
+    - [x] Filled tiles (background color, so labels and hatching draw on top)
+    - [x] Hatched reclaimable tiles (`╱` strokes one shade darker than the fill, per PRD 6.3)
+    - [x] Color tiles by class (detect 256-color vs true-color terminal)
+    - [x] Labels below or inside tiles when space permits (sizes shown whole or not at all)
+    - [x] Selection highlight using reverse video or bright borders (largest tile until M5 adds navigation)
+  - [ ] Side panel (right): legend, disk info, marked list, actions — legend, scan totals, reclaimable total and disk free/total done; marked list and actions come with M6
+  - [x] Bottom bar: selected tile info (path, size, files, last write)
+  - [x] Legend: class → color mapping + hatch meaning
+- [x] Implement tree view fallback (indented list) when terminal < 80 cols or treemap not feasible
+- [x] Implement `ui::Theme`:
+  - [x] Color palette per class (as specified in PRD)
+  - [x] 8-color fallback (16 named ANSI colors; `NO_COLOR` gives mono with labels and hatching)
+  - [ ] Theme config option — M7 (config file)
+- [x] Handle terminal resize (SIGWINCH → redraw; layout recomputed every frame)
+- [x] Write render validation tests (compare rendered frames to expected output; ratatui `TestBackend`)
 
 ### Acceptance Criteria
 
