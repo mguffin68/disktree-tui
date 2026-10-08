@@ -89,11 +89,14 @@ fn mode_flag_rejects_invalid_mode() {
 }
 
 #[test]
-fn disk_flag_is_parsed_but_not_yet_supported() {
-    // Whole-disk scanning arrives with the volume picker; it must not scan `/` here.
-    let output = scan_fixture(&["--disk"]);
+fn disk_flag_with_missing_directory_fails() {
+    // A real --disk scan would walk the whole filesystem holding /tmp; a
+    // missing directory exercises the flag without that.
+    let tmp = TempDir::new().unwrap();
+    let missing = tmp.path().join("missing");
+    let output = run(&["--scan-only", "--disk", missing.to_str().unwrap()]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("--disk"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot find the disk"));
 }
 
 #[test]

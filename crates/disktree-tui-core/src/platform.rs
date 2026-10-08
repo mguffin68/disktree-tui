@@ -145,7 +145,7 @@ fn parse_mountinfo(text: &str) -> Vec<PathBuf> {
 
 /// Decode the octal escapes (`\040` for space, etc.) used in mountinfo paths.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-fn unescape_mount_path(field: &str) -> String {
+pub(crate) fn unescape_mount_path(field: &str) -> String {
     let bytes = field.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;

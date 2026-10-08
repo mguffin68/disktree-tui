@@ -3,13 +3,17 @@
 use std::cmp::Reverse;
 use std::path::PathBuf;
 
+use crate::layout::Weight;
+
 /// A node in the directory tree.
 #[derive(Debug, Clone)]
 pub struct DirNode {
     /// Full filesystem path.
     pub path: PathBuf,
-    /// Size in bytes (disk usage or apparent, depending on config).
+    /// Disk usage in bytes (allocated blocks, as `du` reports).
     pub size: u64,
+    /// Apparent size in bytes: the sum of file lengths, as `ls -l` reports.
+    pub apparent_size: u64,
     /// Number of files (including descendants).
     pub file_count: usize,
     /// Depth below the scan root (0 = root itself).
@@ -39,6 +43,7 @@ impl DirNode {
         Self {
             path,
             size: 0,
+            apparent_size: 0,
             file_count: 0,
             depth,
             name,
@@ -67,12 +72,28 @@ impl DirNode {
 
     /// Bytes in reclaimable directories at or below this node, each counted
     /// once at its outermost reclaimable directory.
-    pub fn reclaimable_size(&self) -> u64 {
+    pub fn reclaimable_size(&self, weight: Weight) -> u64 {
         if self.reclaimable {
-            self.size
+            weight.of(self)
         } else {
-            self.children.iter().map(|c| c.reclaimable_size()).sum()
+            self.children
+                .iter()
+                .map(|c| c.reclaimable_size(weight))
+                .sum()
         }
+    }
+
+    /// The node at `path` within this subtree, if present.
+    pub fn find(&self, path: &std::path::Path) -> Option<&DirNode> {
+        let rel = path.strip_prefix(&self.path).ok()?;
+        let mut node = self;
+        for part in rel {
+            node = node
+                .children
+                .iter()
+                .find(|c| c.path.file_name() == Some(part))?;
+        }
+        Some(node)
     }
 
     /// Levels of directories below this node (0 when it has no children).
@@ -93,6 +114,7 @@ impl DirNode {
     /// Fold another node's totals into this node without attaching it.
     pub fn absorb_totals(&mut self, other: &DirNode) {
         self.size += other.size;
+        self.apparent_size += other.apparent_size;
         self.file_count += other.file_count;
         self.last_write = self.last_write.max(other.last_write);
         self.unreadable |= other.unreadable;
@@ -142,6 +164,18 @@ mod tests {
     }
 
     #[test]
+    fn find_walks_down_by_path() {
+        let mut root = DirNode::new("/r".into(), "r".into(), 0);
+        let mut a = DirNode::new("/r/a".into(), "a".into(), 1);
+        a.absorb_child(DirNode::new("/r/a/b".into(), "b".into(), 2));
+        root.absorb_child(a);
+        assert_eq!(root.find("/r".as_ref()).unwrap().name, "r");
+        assert_eq!(root.find("/r/a/b".as_ref()).unwrap().name, "b");
+        assert!(root.find("/r/x".as_ref()).is_none());
+        assert!(root.find("/elsewhere".as_ref()).is_none());
+    }
+
+    #[test]
     fn height_counts_levels_below() {
         let mut root = DirNode::new("/r".into(), "r".into(), 0);
         assert_eq!(root.height(), 0);
@@ -166,6 +200,6 @@ mod tests {
         code.size = 500;
         root.absorb_child(cache);
         root.absorb_child(code);
-        assert_eq!(root.reclaimable_size(), 50);
+        assert_eq!(root.reclaimable_size(Weight::Size), 50);
     }
 }

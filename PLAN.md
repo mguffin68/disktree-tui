@@ -174,35 +174,35 @@
 
 ### Tasks
 
-- [ ] Implement navigation in `app.rs`:
-  - [ ] Enter directory (deep at any depth)
-  - [ ] Go up one level (Esc/Backspace)
-  - [ ] Back/forward history (`Alt+Left` / `Alt+Right`; `[` / `]` are depth control)
-  - [ ] Move selection between tiles at current level (arrow keys)
-  - [ ] Tab → next largest sibling
-  - [ ] Selection tracking (which directory is "selected")
-- [ ] Implement `filter::Filter`:
-  - [ ] `/` enters filter mode
-  - [ ] Type to match directory names
-  - [ ] Only matched directories keep their class color
-  - [ ] `Enter` applies filter (hides non-matches)
-  - [ ] `Esc` clears filter
-  - [ ] Filter preview showing match count
-- [ ] Implement scan control:
-  - [ ] `R` / `F5` — rescan current directory
-  - [ ] `Esc` during scan — cancel scan
-  - [ ] `Ctrl+O` — choose directory to scan (file picker, minimal)
-  - [ ] `V` — volume picker (list mounted volumes, select one)
-  - [ ] `Ctrl+D` / `G` — scan whole disk
-  - [ ] `D` — toggle disk usage / apparent size
-  - [ ] `I` — toggle hidden files
-  - [ ] `[` / `]` — depth control: wire to `layout::DrawDepth::shallower` / `deeper` (default 2 levels, `--depth` sets the start)
-  - [ ] `T` — cycle mode (size → apparent → file count → age)
-- [ ] Implement `classify::age_color`:
-  - [ ] Last write time → color gradient (this week = bright → older = muted)
-  - [ ] Used in Age mode instead of class color
-- [ ] Wire `--scan-only` mode: scan, print summary, exit (useful for scripting)
-- [ ] Write integration tests for navigation sequences
+- [x] Implement navigation in `app.rs`:
+  - [x] Enter directory (deep at any depth)
+  - [x] Go up one level (Esc/Backspace)
+  - [x] Back/forward history (`Alt+Left` / `Alt+Right`; `[` / `]` are depth control)
+  - [x] Move selection between tiles at current level (arrow keys; spatial neighbor in `nav.rs`; up/down/left/right in the list view)
+  - [x] Tab → next largest sibling
+  - [x] Selection tracking (which directory is "selected"; history entries remember their selection)
+- [x] Implement `filter::Filter` (core; applying prunes to matches and their ancestors, re-totaled):
+  - [x] `/` enters filter mode
+  - [x] Type to match directory names
+  - [x] Only matched directories keep their class color
+  - [x] `Enter` applies filter (hides non-matches)
+  - [x] `Esc` clears filter
+  - [x] Filter preview showing match count
+- [x] Implement scan control:
+  - [x] `R` / `F5` — rescan current directory (rescans the root, returns to the same view and selection)
+  - [x] `Esc` during scan — cancel scan (keeps partial results, shown as `[partial]`)
+  - [x] `Ctrl+O` — choose directory to scan (file picker, minimal: a path prompt)
+  - [x] `V` — volume picker (list mounted volumes, select one; network filesystems listed but never `statvfs`ed)
+  - [x] `Ctrl+D` / `G` — scan whole disk (`volume::mount_root`; `--disk` wired too)
+  - [x] `D` — toggle disk usage / apparent size (instant: the scanner records both)
+  - [x] `I` — toggle hidden files (rescans)
+  - [x] `[` / `]` — depth control: wire to `layout::DrawDepth::shallower` / `deeper` (default 2 levels, `--depth` sets the start)
+  - [x] `T` — cycle mode (size → apparent → file count → age)
+- [x] Implement age coloring (`classify::age_bucket` in core; colors in `ui::Theme`):
+  - [x] Last write time → color gradient (this week = bright → older = muted)
+  - [x] Used in Age mode instead of class color
+- [x] Wire `--scan-only` mode: scan, print summary, exit (useful for scripting)
+- [x] Write integration tests for navigation sequences (key sequences against `App`, plus live tmux runs)
 
 ### Acceptance Criteria
 

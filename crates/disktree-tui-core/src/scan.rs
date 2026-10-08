@@ -38,8 +38,6 @@ pub struct ScanResult {
 /// Configuration for a scan.
 #[derive(Debug, Clone, Default)]
 pub struct ScanConfig {
-    /// Use apparent file size instead of disk usage.
-    pub apparent_size: bool,
     /// Skip hidden entries (names starting with `.`). The scan root itself is
     /// never skipped.
     pub skip_hidden: bool,
@@ -60,7 +58,7 @@ pub struct ScanProgress {
     pub files: usize,
     /// Directories entered so far.
     pub dirs: usize,
-    /// Bytes counted so far.
+    /// Disk usage counted so far.
     pub bytes: u64,
 }
 
@@ -120,7 +118,6 @@ impl Scanner {
             ));
         }
 
-        let apparent = self.config.apparent_size;
         let max_depth = self.config.max_depth.unwrap_or(usize::MAX);
         // Stay on the root's filesystem. Known mounts are skipped by path before
         // anything stats them, because even `lstat` on a dead network mount can
@@ -137,11 +134,9 @@ impl Scanner {
 
         let mut root_node = DirNode::new(root.to_path_buf(), node_name(root), 0);
         root_node.last_write = platform::modified_secs(&root_meta);
-        if !apparent {
-            // Directories' own blocks count toward disk usage, as with `du`.
-            root_node.size = platform::entry_size(&root_meta, false);
-            totals.bytes = root_node.size;
-        }
+        // Directories' own blocks count toward disk usage, as with `du`.
+        root_node.size = platform::entry_size(&root_meta, false);
+        totals.bytes = root_node.size;
         let root_entries = read_sorted(root).unwrap_or_else(|_| {
             unreadable += 1;
             root_node.unreadable = true;
@@ -186,7 +181,8 @@ impl Scanner {
             };
             if file_type.is_symlink() {
                 // Never followed; only the link's own blocks count, as with `du`.
-                if !apparent && let Ok(meta) = entry.metadata() {
+                // Apparent size ignores links, as it ignores directories.
+                if let Ok(meta) = entry.metadata() {
                     let size = platform::entry_size(&meta, false);
                     totals.bytes += size;
                     kept_node(&mut stack, max_depth).size += size;
@@ -210,11 +206,7 @@ impl Scanner {
                     skipped_mounts.push(path);
                     continue;
                 }
-                let own = if apparent {
-                    0
-                } else {
-                    platform::entry_size(&meta, false)
-                };
+                let own = platform::entry_size(&meta, false);
                 totals.dirs += 1;
                 totals.bytes += own;
                 let (entries, failed) = if let Ok(entries) = read_sorted(&path) {
@@ -247,11 +239,12 @@ impl Scanner {
                 {
                     continue;
                 }
-                let size = platform::entry_size(&meta, apparent);
+                let size = platform::entry_size(&meta, false);
                 totals.files += 1;
                 totals.bytes += size;
                 let kept = kept_node(&mut stack, max_depth);
                 kept.size += size;
+                kept.apparent_size += meta.len();
                 kept.file_count += 1;
                 kept.last_write = kept.last_write.max(mtime);
             }
@@ -360,15 +353,15 @@ fn node_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::Weight;
     use std::fs;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
+    /// Tests assert exact byte totals on `apparent_size`; disk usage depends
+    /// on the filesystem's block size. (Both are always measured.)
     fn apparent() -> ScanConfig {
-        ScanConfig {
-            apparent_size: true,
-            ..ScanConfig::default()
-        }
+        ScanConfig::default()
     }
 
     fn write(path: &Path, len: usize) {
@@ -401,7 +394,7 @@ mod tests {
 
         let result = scan(tmp.path(), &apparent()).unwrap();
         assert_eq!(result.file_count, 1);
-        assert_eq!(result.root.size, 11);
+        assert_eq!(result.root.apparent_size, 11);
     }
 
     #[test]
@@ -414,18 +407,18 @@ mod tests {
 
         let result = scan(tmp.path(), &apparent()).unwrap();
         let root = &result.root;
-        assert_eq!(root.size, 650);
+        assert_eq!(root.apparent_size, 650);
         assert_eq!(root.file_count, 4);
         assert_eq!(result.file_count, 4);
         assert_eq!(result.dir_count, 3);
 
         let sub = child(root, "sub");
-        assert_eq!(sub.size, 500);
+        assert_eq!(sub.apparent_size, 500);
         assert_eq!(sub.file_count, 2);
         assert_eq!(sub.depth, 1);
-        assert_eq!(child(sub, "deep").size, 300);
+        assert_eq!(child(sub, "deep").apparent_size, 300);
         assert_eq!(child(sub, "deep").depth, 2);
-        assert_eq!(child(root, "other").size, 50);
+        assert_eq!(child(root, "other").apparent_size, 50);
 
         // Largest child first.
         assert_eq!(root.children[0].name, "sub");
@@ -447,6 +440,7 @@ mod tests {
         }
         #[cfg(not(unix))]
         assert_eq!(result.root.size, 10_000);
+        assert_eq!(result.root.apparent_size, 10_000);
     }
 
     #[cfg(unix)]
@@ -462,11 +456,11 @@ mod tests {
         .unwrap();
 
         let result = scan(tmp.path(), &apparent()).unwrap();
-        assert_eq!(result.root.size, 1000);
+        assert_eq!(result.root.apparent_size, 1000);
         assert_eq!(result.file_count, 1);
         // Sorted walk: the first path by name ("a/...") keeps the bytes.
-        assert_eq!(child(&result.root, "a").size, 1000);
-        assert_eq!(child(&result.root, "b").size, 0);
+        assert_eq!(child(&result.root, "a").apparent_size, 1000);
+        assert_eq!(child(&result.root, "b").apparent_size, 0);
     }
 
     #[cfg(unix)]
@@ -482,7 +476,7 @@ mod tests {
         symlink(tmp.path().join("missing"), tmp.path().join("broken")).unwrap();
 
         let result = scan(tmp.path(), &apparent()).unwrap();
-        assert_eq!(result.root.size, 10);
+        assert_eq!(result.root.apparent_size, 10);
         assert_eq!(result.file_count, 1);
         assert!(result.root.children.is_empty());
         assert_eq!(result.unreadable, 0);
@@ -496,7 +490,7 @@ mod tests {
         write(&tmp.path().join(".config/settings"), 40);
 
         let all = scan(tmp.path(), &apparent()).unwrap();
-        assert_eq!(all.root.size, 70);
+        assert_eq!(all.root.apparent_size, 70);
         assert_eq!(all.file_count, 3);
 
         let config = ScanConfig {
@@ -504,7 +498,7 @@ mod tests {
             ..apparent()
         };
         let visible = scan(tmp.path(), &config).unwrap();
-        assert_eq!(visible.root.size, 10);
+        assert_eq!(visible.root.apparent_size, 10);
         assert_eq!(visible.file_count, 1);
         assert!(visible.root.children.is_empty());
     }
@@ -520,7 +514,7 @@ mod tests {
             ..apparent()
         };
         let result = scan(&root, &config).unwrap();
-        assert_eq!(result.root.size, 30);
+        assert_eq!(result.root.apparent_size, 30);
         assert_eq!(result.root.name, ".cache");
     }
 
@@ -537,14 +531,14 @@ mod tests {
             ..apparent()
         };
         let result = scan(tmp.path(), &config).unwrap();
-        assert_eq!(result.root.size, 1111);
+        assert_eq!(result.root.apparent_size, 1111);
         assert_eq!(result.file_count, 4);
         assert_eq!(result.dir_count, 4);
 
         let l1 = child(&result.root, "l1");
-        assert_eq!(l1.size, 1111);
+        assert_eq!(l1.apparent_size, 1111);
         let l2 = child(l1, "l2");
-        assert_eq!(l2.size, 1110);
+        assert_eq!(l2.apparent_size, 1110);
         assert_eq!(l2.file_count, 3);
         assert!(l2.children.is_empty(), "nodes past depth 2 are folded in");
 
@@ -553,7 +547,7 @@ mod tests {
             ..apparent()
         };
         let result = scan(tmp.path(), &zero).unwrap();
-        assert_eq!(result.root.size, 1111);
+        assert_eq!(result.root.apparent_size, 1111);
         assert!(result.root.children.is_empty());
     }
 
@@ -564,14 +558,15 @@ mod tests {
         write(&tmp.path().join("z/f"), 2);
 
         let result = scan(tmp.path(), &apparent()).unwrap();
-        let names: Vec<_> = result
+        let mut names: Vec<_> = result
             .root
             .children
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(names, ["z", "a"]);
-        assert_eq!(child(&result.root, "z").size, 2);
+        names.sort_unstable();
+        assert_eq!(names, ["a", "z"]);
+        assert_eq!(child(&result.root, "z").apparent_size, 2);
     }
 
     #[cfg(unix)]
@@ -594,7 +589,7 @@ mod tests {
 
         let result = result.unwrap();
         assert_eq!(result.unreadable, 1);
-        assert_eq!(result.root.size, 10);
+        assert_eq!(result.root.apparent_size, 10);
         assert!(child(&result.root, "locked").unreadable);
         assert!(!child(&result.root, "ok").unreadable);
         assert!(result.root.unreadable, "unreadable propagates upward");
@@ -630,14 +625,15 @@ mod tests {
         let result = Scanner::new(apparent())
             .walk(tmp.path(), None, &mounts)
             .unwrap();
-        let names: Vec<_> = result
+        let mut names: Vec<_> = result
             .root
             .children
             .iter()
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(names, ["z", "a"]);
-        assert_eq!(result.root.size, 3);
+        names.sort_unstable();
+        assert_eq!(names, ["a", "z"]);
+        assert_eq!(result.root.apparent_size, 3);
         assert_eq!(result.skipped_mounts, [tmp.path().join("m")]);
     }
 
@@ -677,7 +673,7 @@ mod tests {
         );
         let dist = child(child(modules, "pkg"), "dist");
         assert_eq!(dist.class, Class::Toolchains);
-        assert_eq!(root.reclaimable_size(), 1210);
+        assert_eq!(root.reclaimable_size(Weight::Apparent), 1210);
 
         let mut all = scan(tmp.path(), &apparent()).unwrap().root;
         classify_detached(&mut all);
@@ -723,7 +719,7 @@ mod tests {
         let last = *rx.borrow();
         assert_eq!(last.files, 2);
         assert_eq!(last.dirs, 1);
-        assert_eq!(last.bytes, 12);
+        assert_eq!(last.bytes, result.root.size);
         assert_eq!(result.file_count, 2);
     }
 
@@ -742,7 +738,7 @@ mod tests {
         let result = scan(tmp.path(), &apparent()).unwrap();
         assert!(start.elapsed() < Duration::from_secs(10));
         assert_eq!(result.file_count, 10_000);
-        assert_eq!(result.root.size, 10_000);
+        assert_eq!(result.root.apparent_size, 10_000);
         assert_eq!(result.root.children.len(), 100);
     }
 }

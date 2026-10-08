@@ -83,6 +83,33 @@ impl Class {
     }
 }
 
+/// Labels for [`age_bucket`] values, newest first.
+pub const AGE_LABELS: [&str; 6] = [
+    "this week",
+    "this month",
+    "3 months",
+    "this year",
+    "3 years",
+    "older",
+];
+
+/// How recently something was written, as an index into [`AGE_LABELS`]:
+/// 0 = this week (brightest) through 5 = older or unknown (most muted).
+pub fn age_bucket(last_write: Option<u64>, now: u64) -> usize {
+    const DAY: u64 = 86_400;
+    let Some(t) = last_write else {
+        return AGE_LABELS.len() - 1;
+    };
+    match now.saturating_sub(t) / DAY {
+        0..7 => 0,
+        7..31 => 1,
+        31..92 => 2,
+        92..366 => 3,
+        366..1096 => 4,
+        _ => 5,
+    }
+}
+
 /// Marker files and directories a directory directly contains.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Markers(u16);
@@ -960,6 +987,21 @@ mod tests {
         let m = Markers::CARGO | Markers::GIT;
         assert!(m.contains(Markers::GIT));
         assert!(!m.contains(Markers::PACKAGE_JSON));
+    }
+
+    #[test]
+    fn age_buckets() {
+        let now = 1_000_000_000;
+        let day = 86_400;
+        assert_eq!(age_bucket(Some(now - day), now), 0);
+        assert_eq!(age_bucket(Some(now - 20 * day), now), 1);
+        assert_eq!(age_bucket(Some(now - 60 * day), now), 2);
+        assert_eq!(age_bucket(Some(now - 200 * day), now), 3);
+        assert_eq!(age_bucket(Some(now - 800 * day), now), 4);
+        assert_eq!(age_bucket(Some(now - 2000 * day), now), 5);
+        assert_eq!(age_bucket(None, now), 5);
+        // Future timestamps (clock skew) count as new.
+        assert_eq!(age_bucket(Some(now + 50), now), 0);
     }
 
     #[test]

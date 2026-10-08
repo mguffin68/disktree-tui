@@ -102,22 +102,23 @@ Press **T** to cycle: **Size** → **Apparent** → **File count** → **Age**. 
 | Key | Action |
 |-----|--------|
 | `Enter` | Open selected directory |
-| `Esc` / `Backspace` | Go up one level |
-| `Arrow keys` | Move selection between tiles |
-| `Tab` | Next largest sibling |
+| `Esc` / `Backspace` | Go up one level (`Esc` also clears a filter, or stops a running scan) |
+| `Alt+Left` / `Alt+Right` | Back / forward through visited directories |
+| `Arrow keys` | Move selection between tiles (up/down/left/right in the list view) |
+| `Tab` / `Shift+Tab` | Next / previous sibling by size |
 | `Space` / `X` | Mark / unmark |
 | `C` | Review marked list |
-| `T` | Cycle: size → apparent → files → age |
+| `T` | Cycle: size → apparent → files → age (instant: both sizes are measured in one scan) |
 | `D` | Toggle disk usage / apparent size |
-| `I` | Toggle hidden files |
+| `I` | Toggle hidden files (rescans) |
 | `R` / `F5` | Rescan |
-| `/` | Name filter |
+| `/` | Name filter (live preview with match count; `Enter` applies, `Esc` clears) |
 | `[` / `]` | Draw depth: shallower / deeper (default 2 levels, up to unlimited) |
 | `V` | Volume picker |
-| `Ctrl+O` | Choose scan directory |
-| `G` / `--disk` | Scan whole disk |
+| `Ctrl+O` | Choose scan directory (`~` expands; `Ctrl+U` clears) |
+| `G` / `Ctrl+D` / `--disk` | Scan the whole disk holding the current root |
 | `?` | Show all keybindings |
-| `Q` | Quit |
+| `Q` / `Ctrl+C` | Quit |
 
 **Review screen:** `M` trash · `P` permanent · `!` unmark all · `S` save · `A` agent prompt · `Enter` commit · `Esc` back
 

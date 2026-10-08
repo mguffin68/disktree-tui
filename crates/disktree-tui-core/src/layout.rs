@@ -147,17 +147,21 @@ impl std::str::FromStr for DrawDepth {
 /// What tile area is proportional to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Weight {
-    /// Bytes (disk usage or apparent, whichever the scan measured).
+    /// Disk usage in bytes.
     #[default]
     Size,
+    /// Apparent size in bytes.
+    Apparent,
     /// Number of files.
     Files,
 }
 
 impl Weight {
-    fn of(self, node: &DirNode) -> u64 {
+    /// `node`'s measure under this weight.
+    pub fn of(self, node: &DirNode) -> u64 {
         match self {
             Self::Size => node.size,
+            Self::Apparent => node.apparent_size,
             Self::Files => node.file_count as u64,
         }
     }

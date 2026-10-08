@@ -1,12 +1,23 @@
 //! Treemap rendering: paints laid-out tiles into a ratatui buffer.
 
-use disktree_tui_core::classify::Class;
-use disktree_tui_core::layout::{Rect as LayoutRect, Tile, TileKind};
+use disktree_tui_core::classify::{self, Class};
+use disktree_tui_core::filter::Filter;
+use disktree_tui_core::layout::{Rect as LayoutRect, Tile, TileKind, Weight};
 use disktree_tui_core::tree::{DirNode, format_size};
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::ui::Theme;
+use crate::ui::{Hue, Theme};
+
+/// How tiles are colored and labeled this frame.
+pub struct Paint<'f> {
+    /// What tile sizes are measured in (for labels).
+    pub weight: Weight,
+    /// In Age mode, the current time: color by last write instead of class.
+    pub age_now: Option<u64>,
+    /// While typing a filter, dim tiles that neither match nor hold a match.
+    pub preview: Option<&'f Filter>,
+}
 
 /// Fill glyph for reclaimable tiles.
 const HATCH: &str = "╱";
@@ -18,15 +29,22 @@ const SEPARATOR: &str = "▏";
 struct Look {
     fill: Color,
     band: Color,
+    text: Color,
     hatch: Option<Color>,
     label: String,
-    size: u64,
+    size: String,
 }
 
 /// Paint `tiles` (in layout pre-order, so parents first) into `buf`.
-pub fn render(buf: &mut Buffer, tiles: &[Tile<'_>], selected: Option<&DirNode>, theme: Theme) {
+pub fn render(
+    buf: &mut Buffer,
+    tiles: &[Tile<'_>],
+    selected: Option<&DirNode>,
+    theme: Theme,
+    paint: &Paint<'_>,
+) {
     for tile in tiles {
-        let look = look(tile, theme);
+        let look = look(tile, theme, paint);
         let r = tile.rect;
         fill(buf, r, &look, theme);
 
@@ -34,7 +52,7 @@ pub fn render(buf: &mut Buffer, tiles: &[Tile<'_>], selected: Option<&DirNode>, 
             (tile.kind, selected),
             (TileKind::Dir(node), Some(sel)) if std::ptr::eq(node, sel)
         );
-        let text_style = Style::new().fg(theme.tile_text());
+        let text_style = Style::new().fg(look.text);
         let first_row = if is_selected {
             theme.selection()
         } else if tile.inner.is_some() {
@@ -60,18 +78,19 @@ pub fn render(buf: &mut Buffer, tiles: &[Tile<'_>], selected: Option<&DirNode>, 
     }
 }
 
-fn look(tile: &Tile<'_>, theme: Theme) -> Look {
+fn look(tile: &Tile<'_>, theme: Theme, paint: &Paint<'_>) -> Look {
     let d = tile.depth;
-    let (class, depth, reclaimable, label, size) = match tile.kind {
+    // (node whose class/age colors the tile, depth, reclaimable, label, weight)
+    let (node, depth, reclaimable, label, weight) = match tile.kind {
         TileKind::Dir(node) => (
-            node.class,
+            Some(node),
             d,
             node.reclaimable,
             node.name.clone(),
-            node.size,
+            paint.weight.of(node),
         ),
         TileKind::Files { parent, weight } => (
-            parent.class,
+            Some(parent),
             d + 1,
             parent.reclaimable,
             "(files)".into(),
@@ -88,13 +107,29 @@ fn look(tile: &Tile<'_>, theme: Theme) -> Look {
                 (n, false) => format!("+{n} more"),
                 (n, true) => format!("+{n} more, files"),
             };
-            (Class::Unknown, d, parent.reclaimable, label, weight)
+            (None, d, parent.reclaimable, label, weight)
         }
     };
+    let dimmed = match (paint.preview, tile.kind) {
+        (Some(filter), TileKind::Dir(n)) => !filter.reaches(n),
+        (Some(_), _) => true,
+        (None, _) => false,
+    };
+    let hue = match (node, paint.age_now) {
+        _ if dimmed => Hue::Dim,
+        (None, _) => Hue::Class(Class::Unknown),
+        (Some(n), Some(now)) => Hue::Age(classify::age_bucket(n.last_write, now)),
+        (Some(n), None) => Hue::Class(n.class),
+    };
+    let size = match paint.weight {
+        Weight::Files => format!("{weight} files"),
+        _ => format_size(weight),
+    };
     Look {
-        fill: theme.tile(class, depth),
-        band: theme.band(class, depth),
-        hatch: reclaimable.then(|| theme.hatch(class, depth)),
+        fill: theme.tile(hue, depth),
+        band: theme.band(hue, depth),
+        text: theme.tile_text(hue),
+        hatch: (reclaimable && !dimmed).then(|| theme.hatch(hue, depth)),
         label,
         size,
     }
@@ -133,7 +168,7 @@ fn label(
         return;
     }
     let room = usize::from(r.width - 1);
-    let size = format_size(look.size);
+    let size = &look.size;
     let one_line = format!("{}  {size}", look.label);
     let first = if (subdivided || r.height == 1) && one_line.chars().count() < room {
         one_line
@@ -143,7 +178,7 @@ fn label(
     buf.set_stringn(r.x + 1, r.y, &first, room, first_row);
     // A cut-off size ("46" of "46.1 MiB") misleads; show it whole or not at all.
     if !subdivided && r.height >= 2 && first == look.label && size.chars().count() <= room {
-        buf.set_stringn(r.x + 1, r.y + 1, &size, room, body);
+        buf.set_stringn(r.x + 1, r.y + 1, size, room, body);
     }
 }
 
@@ -172,6 +207,12 @@ mod tests {
         (0..buf.area.height).map(|y| row(buf, y) + "\n").collect()
     }
 
+    const PLAIN: Paint<'static> = Paint {
+        weight: Weight::Size,
+        age_now: None,
+        preview: None,
+    };
+
     fn paint(root: &DirNode, theme: Theme) -> (Buffer, Vec<Tile<'_>>) {
         let area = Rect::new(0, 0, 60, 16);
         let tiles = layout::layout(
@@ -181,7 +222,7 @@ mod tests {
         )
         .tiles;
         let mut buf = Buffer::empty(area);
-        render(&mut buf, &tiles, None, theme);
+        render(&mut buf, &tiles, None, theme, &PLAIN);
         (buf, tiles)
     }
 
@@ -276,7 +317,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "b")
             .map(AsRef::as_ref);
-        render(&mut buf, &tiles, selected, theme);
+        render(&mut buf, &tiles, selected, theme, &PLAIN);
         let b = tiles
             .iter()
             .find(|t| matches!(t.kind, TileKind::Dir(n) if n.name == "b"))
@@ -315,6 +356,72 @@ mod tests {
                 line.is_empty() || line.ends_with("KiB"),
                 "truncated size {line:?}"
             );
+        }
+    }
+
+    #[test]
+    fn age_mode_colors_by_last_write() {
+        let now = 1_000_000_000;
+        let mut fresh = node("fresh", 5000, Class::Code, vec![]);
+        fresh.last_write = Some(now - 3600);
+        let mut stale = node("stale", 5000, Class::Code, vec![]);
+        stale.last_write = Some(now - 4000 * 86_400);
+        let root = node("r", 0, Class::Unknown, vec![fresh, stale]);
+        let theme = Theme::new(ColorDepth::TrueColor);
+        let tiles = layout::layout(
+            &root,
+            layout::Rect::new(0, 0, 60, 16),
+            &LayoutOptions::default(),
+        )
+        .tiles;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 16));
+        let paint = Paint {
+            age_now: Some(now),
+            ..PLAIN
+        };
+        render(&mut buf, &tiles, None, theme, &paint);
+        for t in &tiles {
+            let TileKind::Dir(n) = t.kind else { continue };
+            let expected = if n.name == "fresh" { 0 } else { 5 };
+            let cell = &buf[(t.rect.x + 2, t.rect.bottom() - 1)];
+            assert_eq!(cell.bg, theme.tile(Hue::Age(expected), 1), "{}", n.name);
+        }
+    }
+
+    #[test]
+    fn filter_preview_dims_non_matches() {
+        let root = node(
+            "r",
+            0,
+            Class::Unknown,
+            vec![
+                node("keep", 5000, Class::Code, vec![]),
+                node("other", 5000, Class::Code, vec![]),
+            ],
+        );
+        let theme = Theme::new(ColorDepth::TrueColor);
+        let tiles = layout::layout(
+            &root,
+            layout::Rect::new(0, 0, 60, 16),
+            &LayoutOptions::default(),
+        )
+        .tiles;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 60, 16));
+        let filter = Filter::new("kee").unwrap();
+        let paint = Paint {
+            preview: Some(&filter),
+            ..PLAIN
+        };
+        render(&mut buf, &tiles, None, theme, &paint);
+        for t in &tiles {
+            let TileKind::Dir(n) = t.kind else { continue };
+            let cell = &buf[(t.rect.x + 2, t.rect.bottom() - 1)];
+            let expected = if n.name == "keep" {
+                theme.tile(Class::Code, 1)
+            } else {
+                theme.tile(Hue::Dim, 1)
+            };
+            assert_eq!(cell.bg, expected, "{}", n.name);
         }
     }
 

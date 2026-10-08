@@ -1,6 +1,7 @@
 //! disktree-tui: CLI entry point and terminal event loop.
 
 mod app;
+mod nav;
 mod tree_view;
 mod treemap_view;
 mod ui;
@@ -12,13 +13,14 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::Parser;
-use disktree_tui_core::layout::DrawDepth;
+use disktree_tui_core::layout::{DrawDepth, Weight};
 use disktree_tui_core::platform;
 use disktree_tui_core::scan::{self, ScanConfig, ScanResult};
 use disktree_tui_core::tree::{DirNode, format_size};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use disktree_tui_core::volume;
+use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use crate::app::{App, ViewSettings};
+use crate::app::{Action, App, ViewSettings};
 use crate::ui::{ColorDepth, Theme};
 
 /// disktree-tui: Terminal disk usage explorer and cleanup tool.
@@ -102,11 +104,14 @@ fn main() -> ExitCode {
         return scan_only(&args);
     }
 
-    if args.disk {
-        eprintln!("disktree-tui: --disk is not supported yet");
-        return ExitCode::FAILURE;
-    }
-    match run_tui(&args) {
+    let root = match scan_root(&args) {
+        Ok(root) => root,
+        Err(message) => {
+            eprintln!("disktree-tui: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match run_tui(&args, root) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("disktree-tui: {err}");
@@ -115,10 +120,19 @@ fn main() -> ExitCode {
     }
 }
 
-/// Show the treemap until the user quits. Display only for now: `q`, `Esc`
-/// or `Ctrl+C` quit, and a resize redraws.
-fn run_tui(args: &CliArgs) -> io::Result<()> {
-    let root = args.directory.clone().unwrap_or_else(platform::home_dir);
+/// The directory to scan: the argument (default `$HOME`), or with `--disk`
+/// the root of the filesystem holding it.
+fn scan_root(args: &CliArgs) -> Result<PathBuf, String> {
+    let dir = args.directory.clone().unwrap_or_else(platform::home_dir);
+    if !args.disk {
+        return Ok(dir);
+    }
+    volume::mount_root(&dir)
+        .map_err(|err| format!("cannot find the disk holding {}: {err}", dir.display()))
+}
+
+/// Show the treemap until the user quits.
+fn run_tui(args: &CliArgs, root: PathBuf) -> io::Result<()> {
     let settings = ViewSettings {
         mode: args.mode,
         apparent: args.apparent,
@@ -150,24 +164,22 @@ fn event_loop(
         }
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
+            && app.handle_key(key) == Action::Quit
         {
-            let ctrl_c =
-                key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
-            if ctrl_c || matches!(key.code, KeyCode::Char('q' | 'Q') | KeyCode::Esc) {
-                return Ok(());
-            }
+            return Ok(());
         }
     }
 }
 
 /// Scan the target, print a text summary, and exit.
 fn scan_only(args: &CliArgs) -> ExitCode {
-    if args.disk {
-        eprintln!("disktree-tui: --disk is not supported yet");
-        return ExitCode::FAILURE;
-    }
-
-    let root = args.directory.clone().unwrap_or_else(platform::home_dir);
+    let root = match scan_root(args) {
+        Ok(root) => root,
+        Err(message) => {
+            eprintln!("disktree-tui: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
     let config = scan_only_config(args);
 
     let result = match scan::scan(&root, &config) {
@@ -182,7 +194,12 @@ fn scan_only(args: &CliArgs) -> ExitCode {
     let depth = args
         .depth
         .map_or(1, |d| d.max_depth().unwrap_or(usize::MAX));
-    match print_summary(&mut io::stdout().lock(), &result, args.apparent, depth) {
+    let weight = if args.apparent {
+        Weight::Apparent
+    } else {
+        Weight::Size
+    };
+    match print_summary(&mut io::stdout().lock(), &result, weight, depth) {
         Ok(()) => ExitCode::SUCCESS,
         // Output piped into `head` and closed early: not an error.
         Err(err) if err.kind() == io::ErrorKind::BrokenPipe => ExitCode::SUCCESS,
@@ -195,7 +212,6 @@ fn scan_only(args: &CliArgs) -> ExitCode {
 
 fn scan_only_config(args: &CliArgs) -> ScanConfig {
     ScanConfig {
-        apparent_size: args.apparent,
         skip_hidden: args.no_hidden,
         // Keep the full tree so the reclaimable total sees nested caches and
         // build output at any depth; --depth only limits what is printed.
@@ -207,15 +223,19 @@ fn scan_only_config(args: &CliArgs) -> ScanConfig {
 fn print_summary(
     out: &mut impl Write,
     result: &ScanResult,
-    apparent: bool,
+    weight: Weight,
     depth: usize,
 ) -> io::Result<()> {
-    let size_kind = if apparent { "apparent" } else { "disk usage" };
+    let size_kind = if weight == Weight::Apparent {
+        "apparent"
+    } else {
+        "disk usage"
+    };
     writeln!(
         out,
         "{}  {} ({size_kind})  {} files  {} dirs  {}",
         result.root.path.display(),
-        format_size(result.root.size),
+        format_size(weight.of(&result.root)),
         result.file_count,
         result.dir_count,
         class_tag(&result.root),
@@ -223,9 +243,9 @@ fn print_summary(
     writeln!(
         out,
         "reclaimable: {}",
-        format_size(result.root.reclaimable_size())
+        format_size(result.root.reclaimable_size(weight))
     )?;
-    print_children(out, &result.root, depth)?;
+    print_children(out, &result.root, weight, depth)?;
     for mount in &result.skipped_mounts {
         writeln!(
             out,
@@ -252,28 +272,35 @@ fn class_tag(node: &DirNode) -> String {
     }
 }
 
-fn print_children(out: &mut impl Write, node: &DirNode, max_depth: usize) -> io::Result<()> {
+fn print_children(
+    out: &mut impl Write,
+    node: &DirNode,
+    weight: Weight,
+    max_depth: usize,
+) -> io::Result<()> {
     if node.depth >= max_depth {
         return Ok(());
     }
     let indent = "  ".repeat(node.depth + 1);
-    for child in node.children.iter().take(SUMMARY_CHILDREN) {
+    let mut children: Vec<&DirNode> = node.children.iter().map(AsRef::as_ref).collect();
+    children.sort_by_key(|c| std::cmp::Reverse(weight.of(c)));
+    for child in children.iter().take(SUMMARY_CHILDREN) {
         writeln!(
             out,
             "{indent}{:>10}{} {:>9} files  {}/  {}",
-            format_size(child.size),
+            format_size(weight.of(child)),
             if child.unreadable { "!" } else { " " },
             child.file_count,
             child.name,
             class_tag(child),
         )?;
-        print_children(out, child, max_depth)?;
+        print_children(out, child, weight, max_depth)?;
     }
-    let hidden = node.children.len().saturating_sub(SUMMARY_CHILDREN);
+    let hidden = children.len().saturating_sub(SUMMARY_CHILDREN);
     if hidden > 0 {
-        let rest: u64 = node.children[SUMMARY_CHILDREN..]
+        let rest: u64 = children[SUMMARY_CHILDREN..]
             .iter()
-            .map(|c| c.size)
+            .map(|c| weight.of(c))
             .sum();
         writeln!(out, "{indent}{:>10}  ({hidden} more)", format_size(rest))?;
     }
@@ -289,7 +316,6 @@ mod tests {
         let args = CliArgs::parse_from(["disktree-tui", "--scan-only", "-D", "1", "--apparent"]);
         let config = scan_only_config(&args);
         assert_eq!(config.max_depth, None);
-        assert!(config.apparent_size);
     }
 
     #[test]

@@ -11,7 +11,14 @@ use crate::ui::Theme;
 
 /// List `root`'s subtree, largest first, down to the draw depth, as many
 /// rows as fit in `area`.
-pub fn render(buf: &mut Buffer, area: Rect, root: &DirNode, settings: ViewSettings, theme: Theme) {
+pub fn render(
+    buf: &mut Buffer,
+    area: Rect,
+    root: &DirNode,
+    settings: ViewSettings,
+    theme: Theme,
+    selected: Option<&DirNode>,
+) {
     let max_depth = settings.depth.max_depth().unwrap_or(usize::MAX);
     let mut rows = Vec::new();
     collect(
@@ -26,9 +33,15 @@ pub fn render(buf: &mut Buffer, area: Rect, root: &DirNode, settings: ViewSettin
     for (y, (depth, node)) in (area.y..area.bottom()).zip(rows) {
         let indent = "  ".repeat(depth - 1);
         let swatch = if node.reclaimable { "╱╱" } else { "██" };
-        let size = match settings.weight() {
-            Weight::Size => format_size(node.size),
+        let weight = settings.weight();
+        let size = match weight {
             Weight::Files => format!("{} files", node.file_count),
+            _ => format_size(weight.of(node)),
+        };
+        let row_style = if selected.is_some_and(|s| std::ptr::eq(s, node)) {
+            theme.selection()
+        } else {
+            Style::new()
         };
         let x = buf
             .set_stringn(
@@ -54,7 +67,7 @@ pub fn render(buf: &mut Buffer, area: Rect, root: &DirNode, settings: ViewSettin
             y,
             rest,
             usize::from(area.right().saturating_sub(x)),
-            Style::new(),
+            row_style,
         );
     }
 }
@@ -71,10 +84,13 @@ fn collect<'a>(
     if depth > max_depth {
         return;
     }
-    let mut children: Vec<&DirNode> = node.children.iter().map(AsRef::as_ref).collect();
-    if weight == Weight::Files {
-        children.sort_by_key(|c| std::cmp::Reverse(c.file_count));
-    }
+    let mut children: Vec<&DirNode> = node
+        .children
+        .iter()
+        .map(AsRef::as_ref)
+        .filter(|c| weight.of(c) > 0)
+        .collect();
+    children.sort_by_key(|c| std::cmp::Reverse(weight.of(c)));
     for child in children {
         if rows.len() >= limit {
             return;
@@ -125,6 +141,7 @@ mod tests {
             &root,
             settings,
             Theme::new(ColorDepth::Ansi16),
+            None,
         );
         (0..height)
             .map(|y| (0..40).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")

@@ -3,17 +3,20 @@
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use disktree_tui_core::classify::Class;
-use disktree_tui_core::layout::{self, LayoutOptions, Rect as LayoutRect, TileKind};
+use disktree_tui_core::classify::{AGE_LABELS, Class};
+use disktree_tui_core::layout::{Rect as LayoutRect, Weight};
 use disktree_tui_core::platform;
 use disktree_tui_core::tree::{DirNode, format_size};
+use disktree_tui_core::volume::Volume;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::app::{App, State};
+use crate::VisMode;
+use crate::app::{App, Input, State, ViewArea, ViewSettings};
+use crate::treemap_view::Paint;
 use crate::{tree_view, treemap_view};
 
 /// Below this width the side panel is dropped and the tree view replaces the
@@ -62,6 +65,42 @@ impl ColorDepth {
 
 /// An RGB triple.
 type Rgb = (u8, u8, u8);
+
+/// What a tile's color encodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hue {
+    /// Its data kind.
+    Class(Class),
+    /// How recently it was written ([`classify::age_bucket`]).
+    Age(usize),
+    /// Filtered out in the live filter preview.
+    Dim,
+}
+
+impl From<Class> for Hue {
+    fn from(class: Class) -> Self {
+        Self::Class(class)
+    }
+}
+
+/// Age-mode colors, newest (bright) to oldest (muted).
+const AGE_RGB: [Rgb; 6] = [
+    (0xFF, 0xD7, 0x00),
+    (0xFF, 0x87, 0x00),
+    (0xAF, 0x5F, 0x00),
+    (0x87, 0x5F, 0x5F),
+    (0x5F, 0x5F, 0x87),
+    (0x3A, 0x3A, 0x3A),
+];
+
+const AGE_ANSI16: [Color; 6] = [
+    Color::LightYellow,
+    Color::Yellow,
+    Color::LightRed,
+    Color::Red,
+    Color::Blue,
+    Color::DarkGray,
+];
 
 /// Class colors and the rest of the palette (PRD 13.3).
 #[derive(Debug, Clone, Copy)]
@@ -113,48 +152,66 @@ impl Theme {
         }
     }
 
-    /// Tile background for a class at a nesting depth; deeper is lighter.
-    pub fn tile(self, class: Class, depth: usize) -> Color {
+    fn base_rgb(hue: Hue) -> Rgb {
+        match hue {
+            Hue::Class(class) => Self::class_rgb(class),
+            Hue::Age(bucket) => AGE_RGB[bucket.min(AGE_RGB.len() - 1)],
+            Hue::Dim => (0x30, 0x30, 0x30),
+        }
+    }
+
+    fn ansi16(hue: Hue) -> Color {
+        match hue {
+            Hue::Class(class) => Self::class_ansi16(class),
+            Hue::Age(bucket) => AGE_ANSI16[bucket.min(AGE_ANSI16.len() - 1)],
+            Hue::Dim => Color::DarkGray,
+        }
+    }
+
+    /// `hue` lightened for nesting depth, then darkened by `shade`.
+    fn shaded(self, hue: Hue, depth: usize, shade: f64) -> Color {
+        let lift = 0.14 * depth.saturating_sub(1).min(4) as f64;
+        let base = mix(Self::base_rgb(hue), (0xFF, 0xFF, 0xFF), lift);
+        self.rgb(mix(base, (0, 0, 0), shade))
+    }
+
+    /// Tile background at a nesting depth; deeper is lighter.
+    pub fn tile(self, hue: impl Into<Hue>, depth: usize) -> Color {
+        let hue = hue.into();
         match self.depth {
-            ColorDepth::Ansi16 => Self::class_ansi16(class),
+            ColorDepth::Ansi16 => Self::ansi16(hue),
             ColorDepth::Mono => Color::Reset,
-            _ => {
-                let lift = 0.14 * depth.saturating_sub(1).min(4) as f64;
-                self.rgb(mix(Self::class_rgb(class), (0xFF, 0xFF, 0xFF), lift))
-            }
+            _ => self.shaded(hue, depth, 0.0),
         }
     }
 
     /// Label band of a subdivided tile: a darker shade of its color.
-    pub fn band(self, class: Class, depth: usize) -> Color {
+    pub fn band(self, hue: impl Into<Hue>, depth: usize) -> Color {
+        let hue = hue.into();
         match self.depth {
-            ColorDepth::Ansi16 => Self::class_ansi16(class),
+            ColorDepth::Ansi16 => Self::ansi16(hue),
             ColorDepth::Mono => Color::Reset,
-            _ => {
-                let lift = 0.14 * depth.saturating_sub(1).min(4) as f64;
-                let base = mix(Self::class_rgb(class), (0xFF, 0xFF, 0xFF), lift);
-                self.rgb(mix(base, (0, 0, 0), 0.35))
-            }
+            _ => self.shaded(hue, depth, 0.35),
         }
     }
 
     /// Hatch strokes over a reclaimable tile: one level darker than its fill.
-    pub fn hatch(self, class: Class, depth: usize) -> Color {
+    pub fn hatch(self, hue: impl Into<Hue>, depth: usize) -> Color {
+        let hue = hue.into();
         match self.depth {
             ColorDepth::Ansi16 => Color::Black,
             ColorDepth::Mono => Color::Reset,
-            _ => {
-                let lift = 0.14 * depth.saturating_sub(1).min(4) as f64;
-                let base = mix(Self::class_rgb(class), (0xFF, 0xFF, 0xFF), lift);
-                self.rgb(mix(base, (0, 0, 0), 0.45))
-            }
+            _ => self.shaded(hue, depth, 0.45),
         }
     }
 
-    /// Text on tiles.
-    pub fn tile_text(self) -> Color {
+    /// Text on a tile of `hue`: black on bright fills, white otherwise.
+    pub fn tile_text(self, hue: impl Into<Hue>) -> Color {
+        let (r, g, b) = Self::base_rgb(hue.into());
+        let luma = 0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b);
         match self.depth {
             ColorDepth::Mono => Color::Reset,
+            _ if luma > 150.0 => Color::Black,
             _ => Color::White,
         }
     }
@@ -191,11 +248,11 @@ impl Theme {
         }
     }
 
-    /// Swatch for a class in the legend.
-    pub fn swatch(self, class: Class) -> Style {
+    /// Legend swatch.
+    pub fn swatch(self, hue: impl Into<Hue>) -> Style {
         match self.depth {
             ColorDepth::Mono => Style::new(),
-            _ => Style::new().fg(self.tile(class, 1)),
+            _ => Style::new().fg(self.tile(hue, 1)),
         }
     }
 }
@@ -259,7 +316,12 @@ pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
                 )),
             ];
             frame.render_widget(Paragraph::new(text).centered(), body);
-            render_bottom_text(frame, bottom, theme, "q quit");
+            render_bottom_text(
+                frame,
+                bottom,
+                theme,
+                "Esc stop (keep partial results) · q quit",
+            );
         }
         State::Error(message) => {
             let text = vec![
@@ -272,10 +334,19 @@ pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
                 Line::from(message.as_str()),
             ];
             frame.render_widget(Paragraph::new(text).centered(), body);
-            render_bottom_text(frame, bottom, theme, "q quit");
+            render_input_or(frame, bottom, app, theme, |frame| {
+                render_bottom_text(
+                    frame,
+                    bottom,
+                    theme,
+                    "Ctrl+O open · V volumes · R retry · q quit",
+                );
+            });
         }
-        State::Ready(result) => {
-            let root = &result.root;
+        State::Ready(_) => {
+            let Some(view) = app.view_node() else {
+                return;
+            };
             let wide = body.width >= MIN_TREEMAP_COLUMNS;
             let (main, side) = if wide {
                 let [main, side] =
@@ -286,34 +357,43 @@ pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
                 (body, None)
             };
 
-            let options = LayoutOptions {
-                weight: app.settings.weight(),
-                max_depth: app.settings.depth.max_depth(),
-                ..LayoutOptions::default()
-            };
-            let tiles = layout::layout(root, to_layout_rect(main), &options);
-            let selected = selected_node(&tiles.tiles);
+            let tiles = app.layout_in(to_layout_rect(main)).unwrap_or_default();
+            let treemap = wide && !tiles.too_small;
+            app.view_area.set(Some(ViewArea {
+                rect: to_layout_rect(main),
+                treemap,
+            }));
+            let selected = app.selected_node();
 
-            if wide && !tiles.too_small {
-                treemap_view::render(frame.buffer_mut(), &tiles.tiles, selected, theme);
+            if treemap {
+                let preview = app.preview_filter();
+                let paint = Paint {
+                    weight: app.settings.weight(),
+                    age_now: (app.settings.mode == VisMode::Age).then(now_secs),
+                    preview: preview.as_ref(),
+                };
+                treemap_view::render(frame.buffer_mut(), &tiles.tiles, selected, theme, &paint);
             } else {
-                tree_view::render(frame.buffer_mut(), main, root, app.settings, theme);
+                tree_view::render(
+                    frame.buffer_mut(),
+                    main,
+                    view,
+                    app.settings,
+                    theme,
+                    selected,
+                );
             }
             if let Some(side) = side {
-                render_side_panel(frame, side, app, result, theme);
+                render_side_panel(frame, side, app, theme);
             }
-            render_selection_bar(frame, bottom, selected.unwrap_or(root), theme);
+            if let Input::Volumes { list, index } = &app.input {
+                render_volume_picker(frame, body, list, *index);
+            }
+            render_input_or(frame, bottom, app, theme, |frame| {
+                render_selection_bar(frame, bottom, selected.unwrap_or(view), app.settings, theme);
+            });
         }
     }
-}
-
-/// The selected tile. Until navigation lands (M5), the largest top-level
-/// directory.
-fn selected_node<'a>(tiles: &[layout::Tile<'a>]) -> Option<&'a DirNode> {
-    tiles.iter().find_map(|t| match t.kind {
-        TileKind::Dir(node) if t.depth == 1 => Some(node),
-        _ => None,
-    })
 }
 
 fn to_layout_rect(r: Rect) -> LayoutRect {
@@ -322,14 +402,28 @@ fn to_layout_rect(r: Rect) -> LayoutRect {
 
 fn render_top_bar(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let s = app.settings;
-    let indicators = format!(
-        "[{}] [{}] [{}] [depth:{}] ",
-        s.mode,
-        if s.apparent { "apparent" } else { "disk" },
-        if s.show_hidden { "hidden" } else { "no hidden" },
-        s.depth,
-    );
-    let crumbs = breadcrumb(&app.root, &platform::home_dir());
+    let mode = match (s.mode, s.apparent) {
+        (VisMode::Size, false) => "size",
+        (VisMode::Size, true) => "apparent",
+        (VisMode::Files, _) => "files",
+        (VisMode::Age, false) => "age",
+        (VisMode::Age, true) => "age, apparent",
+    };
+    let mut indicators = Vec::new();
+    if let Some(filter) = &app.filter {
+        indicators.push(format!("[filter: {}]", filter.query()));
+    }
+    if app.result().is_some_and(|r| r.cancelled) {
+        indicators.push("[partial]".into());
+    }
+    indicators.push(format!("[{mode}]"));
+    indicators.push(format!(
+        "[{}]",
+        if s.show_hidden { "hidden" } else { "no hidden" }
+    ));
+    indicators.push(format!("[depth:{}]", s.depth));
+    let indicators = indicators.join(" ") + " ";
+    let crumbs = breadcrumb(app.view_path(), &platform::home_dir());
     let room = usize::from(area.width).saturating_sub(indicators.chars().count() + 1);
     let crumbs = truncate_left(&crumbs, room);
     let gap = usize::from(area.width)
@@ -377,12 +471,52 @@ fn render_bottom_text(frame: &mut Frame, area: Rect, theme: Theme, text: &str) {
     frame.render_widget(Paragraph::new(format!(" {text}")).style(theme.bar()), area);
 }
 
-fn render_selection_bar(frame: &mut Frame, area: Rect, node: &DirNode, theme: Theme) {
-    let mut parts = vec![
-        node.path.display().to_string(),
-        format_size(node.size),
-        format!("{} files", node.file_count),
-    ];
+/// The bottom bar for a text input, or `otherwise` when none is active.
+fn render_input_or(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    theme: Theme,
+    otherwise: impl FnOnce(&mut Frame),
+) {
+    match &app.input {
+        Input::Filter(query) => {
+            let count = app.preview_count();
+            let noun = if count == 1 { "match" } else { "matches" };
+            let text = format!("/{query}▏  {count} {noun} · Enter filter · Esc clear");
+            render_bottom_text(frame, area, theme, &text);
+        }
+        Input::Path(text) => {
+            let text = format!("Scan directory: {text}▏  Enter scan · Esc cancel");
+            render_bottom_text(frame, area, theme, &text);
+        }
+        Input::Volumes { .. } => {
+            render_bottom_text(frame, area, theme, "↑↓ choose · Enter scan · Esc close");
+        }
+        Input::None => otherwise(frame),
+    }
+}
+
+/// Weight of `node` as text: bytes, or a file count.
+fn measure(node: &DirNode, weight: Weight) -> String {
+    match weight {
+        Weight::Files => format!("{} files", node.file_count),
+        _ => format_size(weight.of(node)),
+    }
+}
+
+fn render_selection_bar(
+    frame: &mut Frame,
+    area: Rect,
+    node: &DirNode,
+    settings: ViewSettings,
+    theme: Theme,
+) {
+    let weight = settings.weight();
+    let mut parts = vec![node.path.display().to_string(), measure(node, weight)];
+    if weight != Weight::Files {
+        parts.push(format!("{} files", node.file_count));
+    }
     if let Some(ts) = node.last_write {
         parts.push(format!("modified {}", ago(ts, now_secs())));
     }
@@ -391,25 +525,25 @@ fn render_selection_bar(frame: &mut Frame, area: Rect, node: &DirNode, theme: Th
     render_bottom_text(frame, area, theme, &parts.join("  "));
 }
 
-fn render_side_panel(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    result: &disktree_tui_core::scan::ScanResult,
-    theme: Theme,
-) {
+fn render_side_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    let (Some(result), Some(view)) = (app.result(), app.view_node()) else {
+        return;
+    };
+    let weight = app.settings.weight();
     let bold = Style::new().add_modifier(Modifier::BOLD);
-    let root = &result.root;
     let mut lines = vec![
+        Line::from(Span::styled("View", bold)),
+        Line::from(format!(" {}", measure(view, weight))),
+        Line::from(format!(
+            " reclaimable {}",
+            measure_reclaimable(view, weight)
+        )),
+        Line::from(""),
         Line::from(Span::styled("Scan", bold)),
-        Line::from(format!(" {}", format_size(root.size))),
+        Line::from(format!(" {}", measure(&result.root, weight))),
         Line::from(format!(
             " {} files, {} dirs",
             result.file_count, result.dir_count
-        )),
-        Line::from(format!(
-            " reclaimable {}",
-            format_size(root.reclaimable_size())
         )),
     ];
     if result.unreadable > 0 {
@@ -426,18 +560,94 @@ fn render_side_panel(
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("Legend", bold)));
-    for class in Class::ALL {
-        lines.push(Line::from(vec![
-            Span::styled(" ██ ", theme.swatch(class)),
-            Span::raw(class.label()),
-        ]));
+    if app.settings.mode == VisMode::Age {
+        for (bucket, label) in AGE_LABELS.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(" ██ ", theme.swatch(Hue::Age(bucket))),
+                Span::raw(*label),
+            ]));
+        }
+    } else {
+        for class in Class::ALL {
+            lines.push(Line::from(vec![
+                Span::styled(" ██ ", theme.swatch(class)),
+                Span::raw(class.label()),
+            ]));
+        }
     }
     lines.push(Line::from(vec![
         Span::styled(" ╱╱ ", Style::new()),
         Span::raw("reclaimable"),
     ]));
+    lines.push(Line::from(""));
+    for hint in [
+        "↵ open  Esc up  ⇥ next",
+        "Alt+←/→ back/forward",
+        "/ filter  t mode  d apparent",
+        "[ ] depth  i hidden  r rescan",
+        "^O open  v volumes  g disk",
+        "q quit",
+    ] {
+        lines.push(Line::from(Span::styled(
+            format!(" {hint}"),
+            Style::new().add_modifier(Modifier::DIM),
+        )));
+    }
     let block = Block::new().borders(Borders::LEFT).title(" disktree ");
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn measure_reclaimable(node: &DirNode, weight: Weight) -> String {
+    match weight {
+        Weight::Files => format!("{} files", node.reclaimable_size(weight)),
+        _ => format_size(node.reclaimable_size(weight)),
+    }
+}
+
+/// Centered list of volumes, the highlighted one reversed.
+fn render_volume_picker(frame: &mut Frame, area: Rect, volumes: &[Volume], index: usize) {
+    let lines: Vec<Line> = if volumes.is_empty() {
+        vec![Line::from(" no volumes found ")]
+    } else {
+        volumes
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let space = v.space.map_or_else(
+                    || "network".to_string(),
+                    |s| {
+                        format!(
+                            "{} free of {}",
+                            format_size(s.available),
+                            format_size(s.total)
+                        )
+                    },
+                );
+                let text = format!(
+                    " {:<28} {:<8} {space} ",
+                    truncate_left(&v.mount_point.display().to_string(), 28),
+                    v.filesystem
+                );
+                let style = if i == index {
+                    Style::new().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::new()
+                };
+                Line::from(Span::styled(text, style))
+            })
+            .collect()
+    };
+    let width = (lines.iter().map(Line::width).max().unwrap_or(20) as u16 + 2).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(" Scan volume ");
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
 fn now_secs() -> u64 {
@@ -547,7 +757,7 @@ mod tests {
         let lines: Vec<&str> = screen.lines().collect();
         // Top bar: breadcrumb and indicators.
         assert!(
-            lines[0].contains("[size] [disk] [hidden] [depth:2]"),
+            lines[0].contains("[size] [hidden] [depth:2]"),
             "{}",
             lines[0]
         );
@@ -574,6 +784,83 @@ mod tests {
         // The selected tile is highlighted.
         let selection = Theme::new(ColorDepth::TrueColor).selection().bg.unwrap();
         assert!((0..120).any(|x| buf[(x, 1)].bg == selection));
+    }
+
+    #[test]
+    fn input_prompts_and_volume_picker_render() {
+        use crate::app::Input;
+        use disktree_tui_core::volume::Volume;
+        let mut app = fixture();
+        app.input = Input::Filter("proj".into());
+        let (screen, _) = draw(&app, 120, 32);
+        let bottom = screen.lines().last().unwrap().to_string();
+        assert!(bottom.contains("/proj▏  1 match"), "{bottom}");
+
+        app.input = Input::Path("/tmp".into());
+        let (screen, _) = draw(&app, 120, 32);
+        assert!(
+            screen
+                .lines()
+                .last()
+                .unwrap()
+                .contains("Scan directory: /tmp▏")
+        );
+
+        app.input = Input::Volumes {
+            list: vec![
+                Volume {
+                    mount_point: "/".into(),
+                    device: "/dev/sda1".into(),
+                    filesystem: "ext4".into(),
+                    space: Some(DiskSpace {
+                        available: 10 << 30,
+                        total: 100 << 30,
+                    }),
+                },
+                Volume {
+                    mount_point: "/mnt/nas".into(),
+                    device: "//nas/share".into(),
+                    filesystem: "cifs".into(),
+                    space: None,
+                },
+            ],
+            index: 1,
+        };
+        let (screen, _) = draw(&app, 120, 32);
+        assert!(screen.contains("Scan volume"), "{screen}");
+        assert!(screen.contains("10.0 GiB free of 100.0 GiB"), "{screen}");
+        assert!(
+            screen.contains("/mnt/nas") && screen.contains("network"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn age_mode_shows_age_legend_and_filter_indicator() {
+        let mut app = fixture();
+        app.settings.mode = VisMode::Age;
+        let (screen, _) = draw(&app, 120, 40);
+        assert!(
+            screen.contains("this week") && screen.contains("older"),
+            "{screen}"
+        );
+        assert!(screen.lines().next().unwrap().contains("[age]"));
+
+        app.settings.mode = VisMode::Size;
+        for c in "/down".chars() {
+            app.handle_key(ratatui::crossterm::event::KeyEvent::from(
+                ratatui::crossterm::event::KeyCode::Char(c),
+            ));
+        }
+        app.handle_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Enter,
+        ));
+        let (screen, _) = draw(&app, 120, 40);
+        assert!(
+            screen.lines().next().unwrap().contains("[filter: down]"),
+            "{screen}"
+        );
+        assert!(!screen.contains(".cache"), "filtered out:\n{screen}");
     }
 
     #[test]
