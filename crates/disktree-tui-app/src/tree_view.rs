@@ -19,18 +19,9 @@ pub fn render(
     theme: Theme,
     selected: Option<&DirNode>,
 ) {
-    let max_depth = settings.depth.max_depth().unwrap_or(usize::MAX);
-    let mut rows = Vec::new();
-    collect(
-        root,
-        1,
-        max_depth,
-        settings.weight(),
-        usize::from(area.height),
-        &mut rows,
-    );
-
-    for (y, (depth, node)) in (area.y..area.bottom()).zip(rows) {
+    for (y, (depth, node)) in
+        (area.y..area.bottom()).zip(rows(root, settings, usize::from(area.height)))
+    {
         let indent = "  ".repeat(depth - 1);
         let swatch = if node.reclaimable { "╱╱" } else { "██" };
         let weight = settings.weight();
@@ -70,6 +61,15 @@ pub fn render(
             row_style,
         );
     }
+}
+
+/// Rows of `(depth, node)` the list renders: children by weight, pre-order
+/// down to the draw depth, cut off after `limit` rows.
+pub fn rows(root: &DirNode, settings: ViewSettings, limit: usize) -> Vec<(usize, &DirNode)> {
+    let max_depth = settings.depth.max_depth().unwrap_or(usize::MAX);
+    let mut rows = Vec::new();
+    collect(root, 1, max_depth, settings.weight(), limit, &mut rows);
+    rows
 }
 
 /// Pre-order rows of `(depth, node)` below `node`, children ordered by weight.

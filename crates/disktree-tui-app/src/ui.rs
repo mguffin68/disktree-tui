@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::VisMode;
-use crate::app::{App, Input, State, ViewArea, ViewSettings};
+use crate::app::{App, ConfirmState, Input, ReviewState, State, ViewArea, ViewSettings};
 use crate::treemap_view::Paint;
 use crate::{tree_view, treemap_view};
 
@@ -237,6 +237,15 @@ impl Theme {
         }
     }
 
+    /// Danger color for marked tiles.
+    pub fn danger_tile(self) -> Color {
+        match self.depth {
+            ColorDepth::Mono => Color::Reset,
+            ColorDepth::Ansi16 => Color::Red,
+            _ => self.rgb((0xAA, 0x00, 0x00)),
+        }
+    }
+
     /// Top and bottom bars.
     pub fn bar(self) -> Style {
         match self.depth {
@@ -371,6 +380,7 @@ pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
                     weight: app.settings.weight(),
                     age_now: (app.settings.mode == VisMode::Age).then(now_secs),
                     preview: preview.as_ref(),
+                    marked: &app.marked,
                 };
                 treemap_view::render(frame.buffer_mut(), &tiles.tiles, selected, theme, &paint);
             } else {
@@ -388,6 +398,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
             }
             if let Input::Volumes { list, index } = &app.input {
                 render_volume_picker(frame, body, list, *index);
+            }
+            if let Input::Review(state) = &app.input {
+                render_review(frame, body, app, state);
             }
             render_input_or(frame, bottom, app, theme, |frame| {
                 render_selection_bar(frame, bottom, selected.unwrap_or(view), app.settings, theme);
@@ -494,6 +507,18 @@ fn render_input_or(
             render_bottom_text(frame, area, theme, "↑↓ choose · Enter scan · Esc close");
         }
         Input::None => otherwise(frame),
+        Input::Review(state) => {
+            let text = if state.confirm.is_some() {
+                " y confirm · n cancel".to_string()
+            } else {
+                let count = app.marked_count();
+                let noun = if count == 1 { "path" } else { "paths" };
+                format!(
+                    " {count} {noun} marked · ↑↓ navigate · M trash · P delete · U unmark · Esc close"
+                )
+            };
+            render_bottom_text(frame, area, theme, &text);
+        }
     }
 }
 
@@ -502,6 +527,14 @@ fn measure(node: &DirNode, weight: Weight) -> String {
     match weight {
         Weight::Files => format!("{} files", node.file_count),
         _ => format_size(weight.of(node)),
+    }
+}
+
+/// `units` as bytes or a file count, depending on the weight.
+fn measure_units(units: u64, weight: Weight) -> String {
+    match weight {
+        Weight::Files => format!("{units} files"),
+        _ => format_size(units),
     }
 }
 
@@ -549,6 +582,39 @@ fn render_side_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     if result.unreadable > 0 {
         lines.push(Line::from(format!(" {} unreadable", result.unreadable)));
     }
+    if !app.marked.is_empty() {
+        let paths = app.marked_paths();
+        let total: u64 = paths.iter().map(|m| m.size).sum();
+        let noun = if paths.len() == 1 { "path" } else { "paths" };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Marked", bold)));
+        lines.push(Line::from(format!(
+            " {} {noun} · {}",
+            paths.len(),
+            measure_units(total, weight)
+        )));
+        for m in paths.iter().take(3) {
+            lines.push(Line::from(format!(
+                " {}",
+                truncate_left(&m.path.display().to_string(), 27)
+            )));
+        }
+        if paths.len() > 3 {
+            lines.push(Line::from(format!(" … +{} more", paths.len() - 3)));
+        }
+    }
+    let worth = app.worth_a_look();
+    if !worth.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Worth a Look", bold)));
+        for (_, name, size) in &worth {
+            lines.push(Line::from(format!(
+                " {}  {}",
+                truncate_left(name, 15),
+                format_size(*size)
+            )));
+        }
+    }
     if let Some(disk) = app.disk {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("Disk", bold)));
@@ -556,7 +622,39 @@ fn render_side_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             " free  {}",
             format_size(disk.available)
         )));
+        if !app.marked.is_empty()
+            && let Some(after) = app.free_space_after_marks()
+        {
+            lines.push(Line::from(format!(" after {}", format_size(after))));
+        }
         lines.push(Line::from(format!(" total {}", format_size(disk.total))));
+    }
+    if let Some(report) = &app.last_removal {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Removed", bold)));
+        let noun = if report.succeeded.len() == 1 {
+            "path"
+        } else {
+            "paths"
+        };
+        if !report.succeeded.is_empty() {
+            lines.push(Line::from(format!(
+                " {} {noun} · {} freed",
+                report.succeeded.len(),
+                format_size(report.freed_bytes)
+            )));
+        }
+        for (path, err) in report.failed.iter().take(2) {
+            let text = format!("{}: {err}", path.display());
+            lines.push(Line::from(Span::styled(
+                format!(" ! {}", truncate_left(&text, 27)),
+                Style::new().fg(theme.danger_tile()),
+            )));
+        }
+        let more = report.failed.len().saturating_sub(2);
+        if more > 0 {
+            lines.push(Line::from(format!(" … +{more} more failed")));
+        }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled("Legend", bold)));
@@ -586,6 +684,7 @@ fn render_side_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         "/ filter  t mode  d apparent",
         "[ ] depth  i hidden  r rescan",
         "^O open  v volumes  g disk",
+        "space mark  c review",
         "q quit",
     ] {
         lines.push(Line::from(Span::styled(
@@ -647,6 +746,96 @@ fn render_volume_picker(frame: &mut Frame, area: Rect, volumes: &[Volume], index
     );
     frame.render_widget(Clear, popup);
     let block = Block::bordered().title(" Scan volume ");
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+}
+
+/// Centered list of the marked paths; a confirm dialog overlays it when one
+/// is pending.
+fn render_review(frame: &mut Frame, area: Rect, app: &App, state: &ReviewState) {
+    let marked = app.marked_paths();
+    let weight = app.settings.weight();
+    let total: u64 = marked.iter().map(|m| m.size).sum();
+    let mut lines = Vec::new();
+    if marked.is_empty() {
+        lines.push(Line::from(" nothing marked "));
+    } else {
+        for (i, m) in marked.iter().enumerate() {
+            let row = format!(
+                " {:<44} {} ",
+                truncate_left(&m.path.display().to_string(), 44),
+                measure_units(m.size, weight)
+            );
+            let style = if i == state.selected {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::new()
+            };
+            lines.push(Line::from(Span::styled(row, style)));
+        }
+        let noun = if marked.len() == 1 { "path" } else { "paths" };
+        lines.push(Line::from(Span::styled(
+            format!(
+                " {} {noun} · {} ",
+                marked.len(),
+                measure_units(total, weight)
+            ),
+            Style::new().add_modifier(Modifier::BOLD),
+        )));
+    }
+    let width = (lines.iter().map(Line::width).max().unwrap_or(20) as u16 + 2).min(area.width);
+    let height = (lines.len() as u16 + 2).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(" Review marked ");
+    frame.render_widget(Paragraph::new(lines).block(block), popup);
+    if let Some(confirm) = state.confirm {
+        render_confirm(frame, area, marked.len(), total, weight, confirm);
+    }
+}
+
+/// Yes/no overlay asking to commit a removal action.
+fn render_confirm(
+    frame: &mut Frame,
+    area: Rect,
+    count: usize,
+    total: u64,
+    weight: Weight,
+    confirm: ConfirmState,
+) {
+    let noun = if count == 1 { "path" } else { "paths" };
+    let size = measure_units(total, weight);
+    let (title, question) = match confirm {
+        ConfirmState::Trash => (
+            " Trash ",
+            format!(" Move {count} {noun} ({size}) to trash? "),
+        ),
+        ConfirmState::Permanent => (
+            " Delete permanently ",
+            format!(" Permanently delete {count} {noun} ({size})? "),
+        ),
+    };
+    let lines = vec![
+        Line::from(question),
+        Line::from(Span::styled(
+            " y confirm · n cancel ",
+            Style::new().add_modifier(Modifier::DIM),
+        )),
+    ];
+    let width = (lines.iter().map(Line::width).max().unwrap_or(20) as u16 + 2).min(area.width);
+    let height = lines.len() as u16 + 2;
+    let popup = Rect::new(
+        area.x + (area.width - width) / 2,
+        area.y + (area.height - height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(title);
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
@@ -833,6 +1022,51 @@ mod tests {
             screen.contains("/mnt/nas") && screen.contains("network"),
             "{screen}"
         );
+    }
+
+    #[test]
+    fn review_screen_lists_marks_and_asks_to_confirm() {
+        use crate::app::{ConfirmState, ReviewState};
+        let mut app = fixture();
+        app.marked.insert("/home/u/.cache".into());
+        app.input = Input::Review(ReviewState {
+            selected: 0,
+            confirm: None,
+        });
+        let (screen, _) = draw(&app, 120, 32);
+        assert!(screen.contains("Review marked"), "{screen}");
+        assert!(screen.contains("/home/u/.cache"), "{screen}");
+        assert!(screen.contains("1 path · 4.0 GiB"), "{screen}");
+
+        if let Input::Review(state) = &mut app.input {
+            state.confirm = Some(ConfirmState::Trash);
+        }
+        let (screen, _) = draw(&app, 120, 32);
+        assert!(
+            screen.contains("Move 1 path (4.0 GiB) to trash?"),
+            "{screen}"
+        );
+
+        if let Input::Review(state) = &mut app.input {
+            state.confirm = Some(ConfirmState::Permanent);
+        }
+        let (screen, _) = draw(&app, 120, 32);
+        assert!(
+            screen.contains("Permanently delete 1 path (4.0 GiB)?"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn side_panel_lists_marks_and_worth_a_look() {
+        let mut app = fixture();
+        app.marked.insert("/home/u/Downloads".into());
+        let (screen, _) = draw(&app, 120, 40);
+        assert!(screen.contains("Marked"), "{screen}");
+        assert!(screen.contains("1 path · 6.0 GiB"), "{screen}");
+        assert!(screen.contains("after 106.0 GiB"), "{screen}");
+        assert!(screen.contains("Worth a Look"), "{screen}");
+        assert!(screen.contains(".cache  4.0 GiB"), "{screen}");
     }
 
     #[test]

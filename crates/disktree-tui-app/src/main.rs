@@ -18,7 +18,7 @@ use disktree_tui_core::platform;
 use disktree_tui_core::scan::{self, ScanConfig, ScanResult};
 use disktree_tui_core::tree::{DirNode, format_size};
 use disktree_tui_core::volume;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, EnableMouseCapture, Event, KeyEventKind};
 
 use crate::app::{Action, App, ViewSettings};
 use crate::ui::{ColorDepth, Theme};
@@ -143,8 +143,10 @@ fn run_tui(args: &CliArgs, root: PathBuf) -> io::Result<()> {
     let mut app = App::start(root, settings);
 
     let mut terminal = ratatui::try_init()?;
-    let result = event_loop(&mut terminal, &mut app, theme);
+    let setup = ratatui::crossterm::execute!(io::stdout(), EnableMouseCapture);
+    let result = setup.and_then(|()| event_loop(&mut terminal, &mut app, theme));
     ratatui::restore();
+    let _ = ratatui::crossterm::execute!(io::stdout(), event::DisableMouseCapture);
     app.cancel_scan();
     result
 }
@@ -162,11 +164,16 @@ fn event_loop(
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
-        if let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-            && app.handle_key(key) == Action::Quit
-        {
-            return Ok(());
+        match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if app.handle_key(key) == Action::Quit {
+                    return Ok(());
+                }
+            }
+            Event::Mouse(mouse) => {
+                app.handle_mouse(mouse);
+            }
+            _ => {}
         }
     }
 }

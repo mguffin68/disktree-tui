@@ -222,37 +222,37 @@
 
 ### Tasks
 
-- [ ] Implement marking in `app.rs`:
-  - [ ] `Space` / `X` — mark/unmark selected tile
-  - [ ] Marked tiles display in danger color (red)
-  - [ ] Marked tile + all descendants marked (absorption)
-  - [ ] Cannot mark individual tiles inside a marked directory
-  - [ ] Marking is reversible (press again to unmark)
-  - [ ] `Ctrl+Click` or `Ctrl+Space` — mark without moving selection
-- [ ] Implement side panel updates:
-  - [ ] Marked list: paths with cumulative size
-  - [ ] Free space now vs. free space after marks
-  - [ ] "Worth a Look" section (largest reclaimable directories)
-- [ ] Implement `review::ReviewScreen`:
-  - [ ] `C` opens review screen
-  - [ ] Lists all marked paths with sizes
-  - [ ] Per-path: unmark option
-  - [ ] Actions: `M` (trash), `P` (permanent delete), `!` (unmark all), `S` (save to file), `A` (copy agent prompt)
-  - [ ] `Enter` commits, `Esc` goes back
-- [ ] Implement removal logic in `disktree-tui-core::removal`:
-  - [ ] Safety guards: refuse root, scanned root, home dir, mount points, system trees
-  - [ ] Trash: cross-platform trash (trash-cli → gio → XDG → system trash → Recycle Bin)
-  - [ ] Permanent delete: `rm -rf` equivalent, path verified (no shell injection)
-  - [ ] Post-removal auto-rescan
-  - [ ] Report free space gained
-- [ ] Write removal safety guard tests:
-  - [ ] Refuse to delete filesystem root
-  - [ ] Refuse to delete scanned root
-  - [ ] Refuse to delete home directory
-  - [ ] Refuse to delete mount points
-  - [ ] Refuse to delete system trees
-  - [ ] Accept deleting files under scanned root (non-system)
-  - [ ] Handle file names with special characters (spaces, quotes, newlines)
+- [x] Implement marking in `app.rs`:
+  - [x] `Space` / `X` — mark/unmark selected tile
+  - [x] Marked tiles display in danger color (red)
+  - [x] Marked tile + all descendants marked (absorption)
+  - [x] Cannot mark individual tiles inside a marked directory
+  - [x] Marking is reversible (press again to unmark)
+  - [x] `Ctrl+Click` or `Ctrl+Space` — mark without moving selection (plain click selects; mouse capture enabled in the event loop)
+- [x] Implement side panel updates:
+  - [x] Marked list: paths with cumulative size
+  - [x] Free space now vs. free space after marks
+  - [x] "Worth a Look" section (largest reclaimable directories)
+- [x] Implement `review::ReviewScreen` (rendered as a centered popup in `ui.rs`):
+  - [x] `C` opens review screen
+  - [x] Lists all marked paths with sizes
+  - [x] Per-path: unmark option (`U`)
+  - [x] Actions: `M` (trash), `P` (permanent delete), `!` (unmark all), `S` (save to file), `A` (copy agent prompt)
+  - [ ] `Enter` commits, `Esc` goes back — `M`/`P` open a Y/N prompt instead of making `Enter` the action key; the report of the last removal is shown in the side panel
+- [x] Implement removal logic in `disktree-tui-core::removal`:
+  - [x] Safety guards: refuse root, scanned root, home dir, mount points, system trees
+  - [x] Trash: cross-platform trash (trash-cli → gio → XDG → system trash → Recycle Bin)
+  - [x] Permanent delete: `rm -rf` equivalent, path verified (no shell injection)
+  - [x] Post-removal auto-rescan
+  - [x] Report free space gained
+- [x] Write removal safety guard tests:
+  - [x] Refuse to delete filesystem root
+  - [x] Refuse to delete scanned root
+  - [x] Refuse to delete home directory
+  - [x] Refuse to delete mount points
+  - [x] Refuse to delete system trees
+  - [x] Accept deleting files under scanned root (non-system)
+  - [x] Handle file names with special characters (spaces, quotes, newlines)
 
 ### Acceptance Criteria
 

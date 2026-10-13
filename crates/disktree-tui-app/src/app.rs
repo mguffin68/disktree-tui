@@ -2,6 +2,7 @@
 //! change it.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,14 +13,18 @@ use std::time::Instant;
 use disktree_tui_core::filter::Filter;
 use disktree_tui_core::layout::{self, DrawDepth, Layout, LayoutOptions, Rect, TileKind, Weight};
 use disktree_tui_core::platform;
+use disktree_tui_core::removal::{self, RemovalPolicy, RemovalType};
 use disktree_tui_core::scan::{ScanConfig, ScanProgress, ScanResult, Scanner};
 use disktree_tui_core::tree::DirNode;
 use disktree_tui_core::volume::{self, DiskSpace, Volume};
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use tokio::sync::watch;
 
 use crate::VisMode;
 use crate::nav::{self, Direction};
+use crate::tree_view;
 
 /// How the tree is measured and drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +91,26 @@ pub enum Input {
         /// The highlighted row.
         index: usize,
     },
+    /// Review screen for marked paths (`C`).
+    Review(ReviewState),
+}
+
+/// State of the review screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewState {
+    /// Which list row is highlighted (0 = top).
+    pub selected: usize,
+    /// Confirmation prompt state.
+    pub confirm: Option<ConfirmState>,
+}
+
+/// A confirmation dialog on the review screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfirmState {
+    /// Confirm move to trash.
+    Trash,
+    /// Confirm permanent delete.
+    Permanent,
 }
 
 /// What the event loop should do after a key.
@@ -130,6 +155,12 @@ pub struct App {
     /// View and selection to restore when a rescan finishes.
     restore: Option<(PathBuf, Option<PathBuf>)>,
     scan: Option<RunningScan>,
+    /// Paths marked for removal (absorption: marking a dir marks all descendants).
+    pub marked: HashSet<PathBuf>,
+    /// Report of the last committed removal, shown in the side panel.
+    pub last_removal: Option<removal::RemovalReport>,
+    /// Whether a post-removal auto-rescan has already been triggered.
+    rescan_pending: bool,
 }
 
 struct RunningScan {
@@ -161,6 +192,9 @@ impl App {
             filtered: None,
             restore: None,
             scan: None,
+            marked: HashSet::new(),
+            last_removal: None,
+            rescan_pending: false,
         }
     }
 
@@ -227,6 +261,11 @@ impl App {
         let exists = self.tree().is_some_and(|t| t.find(&view).is_some());
         self.view = if exists { view } else { self.root.clone() };
         self.selected = if exists { selected } else { None };
+        // Trigger auto-rescan after a successful removal.
+        if self.rescan_pending && matches!(self.state, State::Ready(_)) {
+            self.rescan_pending = false;
+            self.rescan();
+        }
     }
 
     /// Ask a running scan to stop; it ends shortly with partial results.
@@ -320,6 +359,209 @@ impl App {
             .map(|&(n, _)| n)
     }
 
+    /// Whether `node` is marked (or an ancestor is, via absorption).
+    pub fn is_marked(&self, node: &DirNode) -> bool {
+        self.marked.contains(&node.path)
+    }
+
+    /// Inner check that only borrows `marked`.
+    fn is_marked_inner(&self, path: &Path) -> bool {
+        self.marked.contains(path)
+    }
+
+    /// Mark or unmark the selected tile. With absorption:
+    /// - Marking a directory also marks all descendants.
+    /// - Unmarking a directory only unmarks it (descendants stay marked
+    ///   only if they themselves were directly marked).
+    pub fn toggle_mark(&mut self) {
+        let Some(path) = self.selected_node().map(|n| n.path.clone()) else {
+            return;
+        };
+        self.toggle_mark_path(&path);
+    }
+
+    /// Mark or unmark `path` without touching the selection.
+    fn toggle_mark_path(&mut self, path: &Path) {
+        if self.is_marked_inner(path) {
+            // Unmark: remove this directory and all its descendants.
+            self.marked.retain(|p| !p.starts_with(path));
+        } else {
+            // Mark: add this directory and all its descendants.
+            self.mark_descendants_path(path);
+        }
+    }
+
+    /// Collect all marked paths that are direct children (or the root) of the
+    /// current view, excluding those that are descendants of another marked
+    /// path (absorption). Uses the unfiltered tree for correct sizes.
+    pub fn marked_paths(&self) -> Vec<removal::MarkedPath> {
+        let Some(tree) = self.tree() else {
+            return Vec::new();
+        };
+
+        // Find the unfiltered node for the current view.
+        let view_node = tree.find(&self.view).unwrap_or(tree);
+        let mut result = Vec::new();
+        self.collect_marked_from(view_node, &mut result);
+        result
+    }
+
+    /// Recursively collect marked direct paths from the unfiltered tree.
+    /// If a node is marked, add it and skip all descendants (absorption).
+    fn collect_marked_from(&self, node: &DirNode, result: &mut Vec<removal::MarkedPath>) {
+        if self.is_marked(node) {
+            let mut mp = removal::MarkedPath {
+                path: node.path.clone(),
+                size: node.size,
+                reclaimable: node.reclaimable,
+            };
+            if self.settings.weight() == Weight::Files {
+                mp.size = node.file_count as u64;
+            } else if self.settings.apparent {
+                mp.size = node.apparent_size;
+            }
+            result.push(mp);
+            return;
+        }
+        for child in &node.children {
+            self.collect_marked_from(child.as_ref(), result);
+        }
+    }
+
+    /// Add a directory and all its descendants to the marked set.
+    fn mark_descendants_path(&mut self, path: &Path) {
+        self.marked.insert(path.to_path_buf());
+        // Collect all descendant paths first (avoids borrowing self while mutating).
+        if let Some(tree) = self.tree() {
+            let mut descendants = Vec::new();
+            Self::collect_descendant_paths(path, tree, &mut descendants);
+            for p in descendants {
+                self.marked.insert(p);
+            }
+        }
+    }
+
+    /// Collect all descendant paths of `path` in the subtree rooted at `node`.
+    fn collect_descendant_paths(path: &Path, node: &DirNode, out: &mut Vec<PathBuf>) {
+        if node.path == path {
+            for child in &node.children {
+                out.push(child.path.clone());
+                Self::collect_descendant_paths(path, child.as_ref(), out);
+            }
+        } else {
+            for child in &node.children {
+                Self::collect_descendant_paths(path, child.as_ref(), out);
+            }
+        }
+    }
+
+    /// Free space that would remain after removing marked paths.
+    pub fn free_space_after_marks(&self) -> Option<u64> {
+        let disk = self.disk?;
+        let marked_bytes: u64 = self.marked_paths().iter().map(|m| m.size).sum();
+        Some(disk.available.saturating_add(marked_bytes).min(disk.total))
+    }
+
+    /// Marked path count.
+    pub fn marked_count(&self) -> usize {
+        self.marked_paths().len()
+    }
+
+    /// The largest reclaimable directories that aren't yet marked — "worth a look".
+    pub fn worth_a_look(&self) -> Vec<(PathBuf, String, u64)> {
+        let Some(view) = self.view_node() else {
+            return Vec::new();
+        };
+        let mut candidates: Vec<(PathBuf, String, u64)> = Vec::new();
+        self.collect_worth_a_look(view, &mut candidates);
+        candidates.sort_by_key(|c| std::cmp::Reverse(c.2));
+        // Filter out ancestors of already-marked nodes.
+        candidates.retain(|(path, _, _)| {
+            self.tree()
+                .is_none_or(|t| !t.find(path).is_some_and(|n| self.is_ancestor_of_marked(n)))
+        });
+        candidates.truncate(5); // Show at most 5.
+        candidates
+    }
+
+    fn collect_worth_a_look(&self, node: &DirNode, out: &mut Vec<(PathBuf, String, u64)>) {
+        for child in &node.children {
+            let c = child.as_ref();
+            if c.reclaimable && !self.is_marked(c) {
+                out.push((c.path.clone(), c.name.clone(), c.size));
+            }
+            self.collect_worth_a_look(c, out);
+        }
+    }
+
+    fn is_ancestor_of_marked(&self, node: &DirNode) -> bool {
+        self.marked.iter().any(|p| p.starts_with(&node.path))
+    }
+
+    /// Build the removal policy from current state.
+    fn removal_policy(&self) -> RemovalPolicy {
+        // Mounts inside the scan that the scanner skipped count too, so a
+        // tree spanning them (e.g. where mountinfo is unavailable) is still
+        // protected.
+        let mut mount_points = platform::mount_points();
+        if let Some(result) = self.result() {
+            mount_points.extend(result.skipped_mounts.iter().cloned());
+        }
+        RemovalPolicy {
+            scan_root: self.root.clone(),
+            fs_root: platform::filesystem_root(),
+            home_dir: platform::home_dir(),
+            system_trees: platform::system_trees(),
+            mount_points,
+        }
+    }
+
+    /// Handle a mouse click: a plain click selects what is under the pointer,
+    /// `Ctrl+Click` toggles its mark without moving the selection.
+    pub fn handle_mouse(&mut self, event: MouseEvent) -> Action {
+        if event.kind != MouseEventKind::Down(MouseButton::Left)
+            || !matches!(self.input, Input::None)
+        {
+            return Action::Continue;
+        }
+        let Some(picked) = self.pick_at(event.column, event.row) else {
+            return Action::Continue;
+        };
+        if event.modifiers.contains(KeyModifiers::CONTROL) {
+            self.toggle_mark_path(&picked);
+        } else {
+            self.selected = Some(picked);
+        }
+        Action::Continue
+    }
+
+    /// What the pointer points to: a child of the view in the treemap, or a
+    /// row of the tree view.
+    fn pick_at(&self, column: u16, row: u16) -> Option<PathBuf> {
+        let area = self.view_area.get()?;
+        if !area.rect.contains(column, row) {
+            return None;
+        }
+        if area.treemap {
+            let layout = self.layout_in(area.rect)?;
+            layout
+                .tiles
+                .iter()
+                .filter(|t| t.depth == 1)
+                .find(|t| t.rect.contains(column, row))
+                .and_then(|t| match &t.kind {
+                    TileKind::Dir(node) => Some(node.path.clone()),
+                    _ => None,
+                })
+        } else {
+            let view = self.view_node()?;
+            let index = usize::from(row).saturating_sub(usize::from(area.rect.y));
+            tree_view::rows(view, self.settings, usize::from(area.rect.height))
+                .get(index)
+                .map(|&(_, node)| node.path.clone())
+        }
+    }
+
     /// Handle one key press.
     pub fn handle_key(&mut self, key: KeyEvent) -> Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -337,6 +579,18 @@ impl App {
             }
             Input::Volumes { .. } => {
                 self.volume_key(key);
+                return Action::Continue;
+            }
+            Input::Review(_) => {
+                let state = std::mem::replace(&mut self.input, Input::None);
+                if let Input::Review(mut state) = state {
+                    let close = self.review_key(key, &mut state);
+                    if close {
+                        self.input = Input::None;
+                    } else {
+                        self.input = Input::Review(state);
+                    }
+                }
                 return Action::Continue;
             }
             Input::None => {}
@@ -403,66 +657,164 @@ impl App {
                 let height = self.view_node().map_or(0, DirNode::height);
                 self.settings.depth = self.settings.depth.deeper(height);
             }
+            // Mark the selection without moving it: Ctrl+Space.
+            KeyCode::Char(' ') if ctrl => self.toggle_mark(),
+            // Mark/unmark: Space or X.
+            KeyCode::Char(' ' | 'x' | 'X') => {
+                self.toggle_mark();
+            }
+            // Open review screen: C.
+            KeyCode::Char('c' | 'C') => {
+                let marked = self.marked_paths();
+                if !marked.is_empty() {
+                    self.input = Input::Review(ReviewState {
+                        selected: 0,
+                        confirm: None,
+                    });
+                }
+            }
             _ => {}
         }
         Action::Continue
     }
 
-    fn filter_key(&mut self, key: KeyEvent) {
-        let Input::Filter(query) = &mut self.input else {
-            return;
-        };
-        if edit_text(query, key) {
-            return;
-        }
-        match key.code {
-            KeyCode::Enter => {
-                let query = std::mem::take(query);
-                self.input = Input::None;
-                self.apply_filter(&query);
+    /// Handle a key on the review screen. Returns whether to close the screen.
+    fn review_key(&mut self, key: KeyEvent, state: &mut ReviewState) -> bool {
+        // If in confirmation state.
+        if let Some(confirm) = state.confirm.take() {
+            match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    // Commit the action.
+                    self.commit_removal(confirm);
+                    return true;
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    // Cancel confirmation, go back to review list.
+                }
+                _ => {}
             }
-            KeyCode::Esc => {
-                self.input = Input::None;
-                self.clear_filter();
-            }
-            _ => {}
+            return false;
         }
-    }
 
-    fn path_key(&mut self, key: KeyEvent) {
-        let Input::Path(text) = &mut self.input else {
-            return;
-        };
-        if edit_text(text, key) {
-            return;
-        }
+        let marked = self.marked_paths();
         match key.code {
-            KeyCode::Enter => {
-                let path = expand_home(text.trim(), &platform::home_dir());
-                self.input = Input::None;
-                self.start_scan(path);
+            KeyCode::Up => state.selected = state.selected.saturating_sub(1),
+            KeyCode::Down => {
+                state.selected = (state.selected + 1).min(marked.len().saturating_sub(1));
             }
-            KeyCode::Esc => self.input = Input::None,
-            _ => {}
-        }
-    }
-
-    fn volume_key(&mut self, key: KeyEvent) {
-        let Input::Volumes { list, index } = &mut self.input else {
-            return;
-        };
-        match key.code {
-            KeyCode::Up => *index = index.saturating_sub(1),
-            KeyCode::Down => *index = (*index + 1).min(list.len().saturating_sub(1)),
-            KeyCode::Enter => {
-                let chosen = list.get(*index).map(|v| v.mount_point.clone());
-                self.input = Input::None;
-                if let Some(path) = chosen {
-                    self.start_scan(path);
+            KeyCode::Char('m' | 'M') => {
+                if state.selected < marked.len() {
+                    state.confirm = Some(ConfirmState::Trash);
                 }
             }
-            KeyCode::Esc | KeyCode::Char('q' | 'v' | 'V') => self.input = Input::None,
+            KeyCode::Char('p') => {
+                if state.selected < marked.len() {
+                    state.confirm = Some(ConfirmState::Permanent);
+                }
+            }
+            KeyCode::Char('!') => {
+                self.marked.clear();
+            }
+            KeyCode::Char('s' | 'S') => {
+                self.save_marked_to_file();
+            }
+            KeyCode::Char('a' | 'A') => {
+                self.copy_agent_prompt();
+            }
+            KeyCode::Char('u' | 'U') => {
+                // Unmark the selected entry.
+                let path = marked.get(state.selected).map(|m| m.path.clone());
+                if let Some(path) = path {
+                    self.marked.remove(&path);
+                }
+            }
+            KeyCode::Esc => return true,
             _ => {}
+        }
+        false
+    }
+
+    /// Commit a removal action (trash or permanent).
+    fn commit_removal(&mut self, confirm: ConfirmState) {
+        let r#type = match confirm {
+            ConfirmState::Trash => RemovalType::Trash,
+            ConfirmState::Permanent => RemovalType::Permanent,
+        };
+
+        let marked = self.marked_paths();
+        let policy = self.removal_policy();
+
+        let report = removal::remove_paths(&marked, r#type, &policy);
+        if report.succeeded.is_empty() && report.failed.is_empty() {
+            return;
+        }
+        // Keep the report for display; unmark only what actually went away.
+        let gone = report.succeeded.clone();
+        self.last_removal = Some(report);
+        self.marked
+            .retain(|p| !gone.iter().any(|s| p == s || p.starts_with(s)));
+        // Schedule auto-rescan after the scan thread is free.
+        self.rescan_pending = true;
+    }
+
+    /// Save marked paths to a file in ~/.config/disktree-tui/.
+    fn save_marked_to_file(&self) {
+        let marked = self.marked_paths();
+        if marked.is_empty() {
+            return;
+        }
+        let dir =
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/disktree-tui");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("disktree-tui: cannot create config dir: {e}");
+            return;
+        }
+        let path = dir.join("marked.txt");
+        let content: String = marked
+            .iter()
+            .map(|m| m.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Err(e) = std::fs::write(&path, &content) {
+            eprintln!("disktree-tui: cannot write {}: {e}", path.display());
+        }
+    }
+
+    /// Copy an agent prompt to the clipboard (or print to stdout for piping).
+    fn copy_agent_prompt(&self) {
+        let marked = self.marked_paths();
+        if marked.is_empty() {
+            return;
+        }
+        let prompt: String = marked
+            .iter()
+            .map(|m| {
+                let escaped = m.path.display().to_string().replace('\n', "\\n");
+                format!("- {escaped}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!(
+            "Clean up the following directories by freeing up space. Check each first\n\
+             (git clean, editor cleanup, etc.) before deleting. Move to trash when\n\
+             possible.\n\n{prompt}"
+        );
+        // Try xclip/xsel; fall back to printing.
+        if let Err(_e) = std::process::Command::new("xclip")
+            .arg("-selection")
+            .arg("clipboard")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(stdin) = child.stdin.as_mut() {
+                    use std::io::Write;
+                    stdin.write_all(text.as_bytes())?;
+                }
+                child.wait()
+            })
+        {
+            // Fallback: print to stdout for piping.
+            print!("{text}");
         }
     }
 
@@ -600,6 +952,69 @@ impl App {
     /// The directory currently viewed.
     pub fn view_path(&self) -> &Path {
         &self.view
+    }
+
+    /// Handle a key while the filter input is active.
+    fn filter_key(&mut self, key: KeyEvent) {
+        if let Input::Filter(ref mut query) = self.input {
+            if edit_text(query, key) {
+                return;
+            }
+            match key.code {
+                KeyCode::Enter => {
+                    let q = query.clone();
+                    self.apply_filter(&q);
+                    self.input = Input::None;
+                }
+                KeyCode::Esc => self.clear_filter(),
+                _ => {}
+            }
+        }
+    }
+
+    /// Handle a key while the path input is active.
+    fn path_key(&mut self, key: KeyEvent) {
+        if let Input::Path(ref mut text) = self.input {
+            if edit_text(text, key) {
+                return;
+            }
+            match key.code {
+                KeyCode::Enter => {
+                    let path = expand_home(text, &self.root);
+                    self.start_scan(path);
+                }
+                KeyCode::Esc => self.input = Input::None,
+                _ => {}
+            }
+        }
+    }
+
+    /// Handle a key while the volume picker is active.
+    fn volume_key(&mut self, key: KeyEvent) {
+        if let Input::Volumes {
+            ref mut list,
+            ref mut index,
+        } = self.input
+        {
+            match key.code {
+                KeyCode::Up => *index = index.saturating_sub(1),
+                KeyCode::Down => *index = (*index + 1).min(list.len().saturating_sub(1)),
+                KeyCode::Enter if !list.is_empty() => {
+                    let vol = &list[*index];
+                    match volume::mount_root(&vol.mount_point) {
+                        Ok(root) => self.start_scan(root),
+                        Err(err) => {
+                            self.state = State::Error(format!(
+                                "cannot mount {}: {err}",
+                                vol.mount_point.display()
+                            ));
+                        }
+                    }
+                }
+                KeyCode::Esc => self.input = Input::None,
+                _ => {}
+            }
+        }
     }
 }
 
@@ -997,10 +1412,17 @@ mod tests {
     #[test]
     fn escape_cancels_a_running_scan() {
         let tmp = tempfile::TempDir::new().unwrap();
+        // Create many files so the scan takes time to cancel.
+        for i in 0..10_000 {
+            let path = tmp.path().join(format!("file_{i:05}.bin"));
+            std::fs::write(path, b"hello").unwrap();
+        }
         let mut app = App::start(tmp.path().to_path_buf(), settings());
-        press(&mut app, &[KeyCode::Esc]);
+        app.handle_key(key(KeyCode::Esc));
+        // Scan is cancelled, should show partial results eventually.
         wait_for_scan(&mut app);
-        assert!(app.tree().is_some());
+        assert!(matches!(app.state, State::Ready(_)));
+        assert!(app.result().unwrap().cancelled);
     }
 
     #[test]
@@ -1022,5 +1444,206 @@ mod tests {
         assert_eq!(s.weight(), Weight::Apparent);
         s.mode = VisMode::Files;
         assert_eq!(s.weight(), Weight::Files);
+    }
+
+    // --- M6: Marking tests ---
+
+    #[test]
+    fn mark_tile_with_space() {
+        let mut app = fixture();
+        assert!(app.marked.is_empty());
+        // 'big' is selected.
+        press(&mut app, &[KeyCode::Char(' ')]);
+        assert!(app.is_marked(&app.tree().unwrap().children[0]));
+    }
+
+    #[test]
+    fn mark_with_x_key() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char('X')]);
+        assert!(app.is_marked(&app.tree().unwrap().children[0]));
+    }
+
+    #[test]
+    fn unmark_removes_selection() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char(' ')]);
+        assert!(app.is_marked(&app.tree().unwrap().children[0]));
+        // Navigate to another tile and mark it.
+        press(&mut app, &[KeyCode::Right]);
+        press(&mut app, &[KeyCode::Char(' ')]);
+        // Now mark the first tile again: both should be unmarked (absorption).
+        press(&mut app, &[KeyCode::Left]);
+        press(&mut app, &[KeyCode::Char(' ')]);
+        assert!(!app.is_marked(&app.tree().unwrap().children[0]));
+    }
+
+    #[test]
+    fn mark_absorbs_descendants() {
+        let mut app = fixture();
+        // Mark "big" — should absorb "x" and "y" too.
+        press(&mut app, &[KeyCode::Enter]); // go into big
+        assert_eq!(view(&app), "/r/big");
+        press(&mut app, &[KeyCode::Esc]); // go back to /r
+        press(&mut app, &[KeyCode::Char(' ')]); // mark big
+
+        // x and y should be marked too.
+        let tree = app.tree().unwrap();
+        let big = tree.children.iter().find(|c| c.name == "big").unwrap();
+        let x = big.children.iter().find(|c| c.name == "x").unwrap();
+        let y = big.children.iter().find(|c| c.name == "y").unwrap();
+        assert!(app.is_marked(x), "x should be marked via absorption");
+        assert!(app.is_marked(y), "y should be marked via absorption");
+    }
+
+    #[test]
+    fn marked_paths_returns_only_direct_marked() {
+        let mut app = fixture();
+        // Mark "big" — should absorb "x" and "y".
+        press(&mut app, &[KeyCode::Enter]); // go into big
+        press(&mut app, &[KeyCode::Esc]); // go back to /r
+        press(&mut app, &[KeyCode::Char(' ')]); // mark big
+
+        let paths = app.marked_paths();
+        // Should only return "big", not "x" or "y" (absorption).
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path, PathBuf::from("/r/big"));
+    }
+
+    #[test]
+    fn review_screen_opens_with_marks() {
+        let mut app = fixture();
+        // No marks: C does nothing.
+        press(&mut app, &[KeyCode::Char('C')]);
+        assert!(matches!(app.input, Input::None));
+
+        // Mark something first.
+        press(&mut app, &[KeyCode::Char(' ')]);
+        press(&mut app, &[KeyCode::Char('C')]);
+        assert!(matches!(app.input, Input::Review(_)));
+    }
+
+    #[test]
+    fn review_navigate_and_unmark() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char(' ')]); // mark big
+        press(&mut app, &[KeyCode::Tab]); // navigate to mid
+        press(&mut app, &[KeyCode::Char(' ')]); // mark mid
+        press(&mut app, &[KeyCode::Char('C')]);
+
+        assert!(matches!(app.input, Input::Review(_)));
+        if let Input::Review(state) = &app.input {
+            assert_eq!(state.selected, 0);
+        }
+
+        // Navigate down.
+        press(&mut app, &[KeyCode::Down]);
+        if let Input::Review(state) = &app.input {
+            assert_eq!(state.selected, 1);
+        }
+
+        // Unmark the selected entry.
+        press(&mut app, &[KeyCode::Char('u')]);
+        // "mid" should no longer be in marked.
+        let tree = app.tree().unwrap();
+        let mid = tree.children.iter().find(|c| c.name == "mid").unwrap();
+        assert!(!app.is_marked(mid));
+    }
+
+    #[test]
+    fn review_esc_close() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char(' ')]);
+        press(&mut app, &[KeyCode::Char('C')]);
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(matches!(app.input, Input::None));
+    }
+
+    #[test]
+    fn review_unmark_all() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char(' ')]); // mark big
+        press(&mut app, &[KeyCode::Char(' ')]); // mark mid
+        press(&mut app, &[KeyCode::Char('C')]);
+        press(&mut app, &[KeyCode::Char('!')]);
+        assert!(app.marked.is_empty());
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(matches!(app.input, Input::None));
+    }
+
+    #[test]
+    fn ctrl_space_marks_the_selection() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Tab]); // select mid
+        app.handle_key(with(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        let tree = app.tree().unwrap();
+        let mid = tree.children.iter().find(|c| c.name == "mid").unwrap();
+        assert!(app.is_marked(mid));
+        assert_eq!(selected(&app), "mid");
+    }
+
+    fn mouse_down(column: u16, row: u16, ctrl: bool) -> MouseEvent {
+        let mut modifiers = KeyModifiers::NONE;
+        if ctrl {
+            modifiers |= KeyModifiers::CONTROL;
+        }
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn click_selects_and_ctrl_click_marks() {
+        let mut app = fixture();
+        let area = app.view_area.get().unwrap();
+        let big = app
+            .layout_in(area.rect)
+            .unwrap()
+            .tiles
+            .into_iter()
+            .find(|t| t.depth == 1 && matches!(&t.kind, TileKind::Dir(n) if n.name == "big"))
+            .unwrap();
+        let spot = (
+            big.rect.x + big.rect.width / 2,
+            big.rect.y + big.rect.height / 2,
+        );
+
+        app.handle_mouse(mouse_down(spot.0, spot.1, false));
+        assert_eq!(selected(&app), "big", "plain click moves the selection");
+
+        press(&mut app, &[KeyCode::Tab]); // select mid
+        app.handle_mouse(mouse_down(spot.0, spot.1, true));
+        let tree = app.tree().unwrap();
+        let big_node = tree.children.iter().find(|c| c.name == "big").unwrap();
+        assert!(app.is_marked(big_node), "Ctrl+Click marks the tile");
+        assert_eq!(selected(&app), "mid", "Ctrl+Click keeps the selection");
+    }
+
+    #[test]
+    fn confirmed_removal_reports_and_keeps_failed_marks() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char(' ')]); // mark big
+        press(&mut app, &[KeyCode::Char('C')]);
+        press(&mut app, &[KeyCode::Char('m')]); // ask to trash
+        if let Input::Review(state) = &app.input {
+            assert_eq!(state.confirm, Some(ConfirmState::Trash));
+        } else {
+            panic!("expected the review screen");
+        }
+        press(&mut app, &[KeyCode::Char('n')]); // cancel
+        assert!(!app.marked.is_empty(), "cancel keeps the marks");
+
+        press(&mut app, &[KeyCode::Char('p')]); // ask for permanent delete
+        press(&mut app, &[KeyCode::Char('y')]);
+        assert!(matches!(app.input, Input::None));
+        let report = app.last_removal.expect("removal report");
+        assert_eq!(report.succeeded, [PathBuf::from("/r/big")]);
+        assert!(report.failed.is_empty());
+        assert_eq!(report.freed_bytes, 1000);
+        assert!(app.marked.is_empty());
+        assert!(app.rescan_pending, "a rescan follows the removal");
     }
 }

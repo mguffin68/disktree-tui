@@ -17,6 +17,8 @@ pub struct Paint<'f> {
     pub age_now: Option<u64>,
     /// While typing a filter, dim tiles that neither match nor hold a match.
     pub preview: Option<&'f Filter>,
+    /// Set of marked paths (for danger styling).
+    pub marked: &'f std::collections::HashSet<std::path::PathBuf>,
 }
 
 /// Fill glyph for reclaimable tiles.
@@ -110,6 +112,12 @@ fn look(tile: &Tile<'_>, theme: Theme, paint: &Paint<'_>) -> Look {
             (None, d, parent.reclaimable, label, weight)
         }
     };
+    let is_marked = match tile.kind {
+        TileKind::Dir(n) => paint.marked.contains(&n.path),
+        TileKind::Files { parent, .. } | TileKind::Overflow { parent, .. } => {
+            paint.marked.contains(&parent.path)
+        }
+    };
     let dimmed = match (paint.preview, tile.kind) {
         (Some(filter), TileKind::Dir(n)) => !filter.reaches(n),
         (Some(_), _) => true,
@@ -126,10 +134,18 @@ fn look(tile: &Tile<'_>, theme: Theme, paint: &Paint<'_>) -> Look {
         _ => format_size(weight),
     };
     Look {
-        fill: theme.tile(hue, depth),
+        fill: if is_marked {
+            theme.danger_tile()
+        } else {
+            theme.tile(hue, depth)
+        },
         band: theme.band(hue, depth),
-        text: theme.tile_text(hue),
-        hatch: (reclaimable && !dimmed).then(|| theme.hatch(hue, depth)),
+        text: theme.tile_text(if is_marked {
+            Hue::Class(Class::Media)
+        } else {
+            hue
+        }),
+        hatch: (reclaimable && !dimmed && !is_marked).then(|| theme.hatch(hue, depth)),
         label,
         size,
     }
@@ -207,11 +223,17 @@ mod tests {
         (0..buf.area.height).map(|y| row(buf, y) + "\n").collect()
     }
 
-    const PLAIN: Paint<'static> = Paint {
-        weight: Weight::Size,
-        age_now: None,
-        preview: None,
-    };
+    static NO_MARKS: std::sync::LazyLock<std::collections::HashSet<std::path::PathBuf>> =
+        std::sync::LazyLock::new(std::collections::HashSet::new);
+
+    fn plain() -> Paint<'static> {
+        Paint {
+            weight: Weight::Size,
+            age_now: None,
+            preview: None,
+            marked: &NO_MARKS,
+        }
+    }
 
     fn paint(root: &DirNode, theme: Theme) -> (Buffer, Vec<Tile<'_>>) {
         let area = Rect::new(0, 0, 60, 16);
@@ -222,7 +244,7 @@ mod tests {
         )
         .tiles;
         let mut buf = Buffer::empty(area);
-        render(&mut buf, &tiles, None, theme, &PLAIN);
+        render(&mut buf, &tiles, None, theme, &plain());
         (buf, tiles)
     }
 
@@ -317,7 +339,7 @@ mod tests {
             .iter()
             .find(|c| c.name == "b")
             .map(AsRef::as_ref);
-        render(&mut buf, &tiles, selected, theme, &PLAIN);
+        render(&mut buf, &tiles, selected, theme, &plain());
         let b = tiles
             .iter()
             .find(|t| matches!(t.kind, TileKind::Dir(n) if n.name == "b"))
@@ -377,7 +399,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 60, 16));
         let paint = Paint {
             age_now: Some(now),
-            ..PLAIN
+            ..plain()
         };
         render(&mut buf, &tiles, None, theme, &paint);
         for t in &tiles {
@@ -410,7 +432,7 @@ mod tests {
         let filter = Filter::new("kee").unwrap();
         let paint = Paint {
             preview: Some(&filter),
-            ..PLAIN
+            ..plain()
         };
         render(&mut buf, &tiles, None, theme, &paint);
         for t in &tiles {
