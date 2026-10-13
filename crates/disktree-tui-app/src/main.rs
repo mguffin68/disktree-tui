@@ -1,6 +1,7 @@
 //! disktree-tui: CLI entry point and terminal event loop.
 
 mod app;
+mod help;
 mod nav;
 mod tree_view;
 mod treemap_view;

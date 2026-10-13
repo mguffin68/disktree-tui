@@ -16,6 +16,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::VisMode;
 use crate::app::{App, ConfirmState, Input, ReviewState, State, ViewArea, ViewSettings};
+use crate::help;
 use crate::treemap_view::Paint;
 use crate::{tree_view, treemap_view};
 
@@ -402,6 +403,9 @@ pub fn render(frame: &mut Frame, app: &App, theme: Theme) {
             if let Input::Review(state) = &app.input {
                 render_review(frame, body, app, state);
             }
+            if let Input::Help = &app.input {
+                render_help(frame, body, app);
+            }
             render_input_or(frame, bottom, app, theme, |frame| {
                 render_selection_bar(frame, bottom, selected.unwrap_or(view), app.settings, theme);
             });
@@ -518,6 +522,9 @@ fn render_input_or(
                 )
             };
             render_bottom_text(frame, area, theme, &text);
+        }
+        Input::Help => {
+            render_bottom_text(frame, area, theme, "↑↓ scroll · ? or Esc close");
         }
     }
 }
@@ -839,6 +846,29 @@ fn render_confirm(
     frame.render_widget(Paragraph::new(lines).block(block), popup);
 }
 
+/// Centered keybinding overlay, scrolled by [`App`]'s help offset.
+fn render_help(frame: &mut Frame, area: Rect, app: &App) {
+    let all = help::lines();
+    let width = (all.iter().map(Line::width).max().unwrap_or(20) as u16 + 2).min(area.width);
+    let height = (all.len() as u16 + 2).min(area.height);
+    let popup = Rect::new(
+        area.x + (area.width.saturating_sub(width)) / 2,
+        area.y + (area.height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, popup);
+    let block = Block::bordered().title(" Keys ");
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let visible = inner.height as usize;
+    app.help_viewport.set(visible);
+    let max = all.len().saturating_sub(visible);
+    let offset = app.help_offset().min(max);
+    let end = (offset + visible).min(all.len());
+    frame.render_widget(Paragraph::new(all[offset..end].to_vec()), inner);
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -871,6 +901,16 @@ mod tests {
     use disktree_tui_core::volume::DiskSpace;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
 
     fn settings() -> ViewSettings {
         ViewSettings {
@@ -1206,5 +1246,38 @@ mod tests {
         assert_eq!(ago(now - 3 * 86_400, now), "3 days ago");
         assert_eq!(ago(now - 21 * 86_400, now), "3 weeks ago");
         assert_eq!(ago(now - 400 * 86_400, now), "1 year ago");
+    }
+
+    #[test]
+    fn help_overlay_lists_bindings_and_clears_the_screen() {
+        let mut app = fixture();
+        app.input = Input::Help;
+        let (screen, _) = draw(&app, 100, 40);
+        assert!(screen.contains("Keys"), "the overlay has a title");
+        assert!(screen.contains("Navigate"), "group headings show");
+        assert!(
+            screen.contains("Quit"),
+            "the full list fits a tall terminal"
+        );
+    }
+
+    #[test]
+    fn help_overlay_fits_a_small_terminal() {
+        let mut app = fixture();
+        app.input = Input::Help;
+        let (screen, _) = draw(&app, 30, 8);
+        assert!(screen.contains("Keys"), "clamped overlay still draws");
+    }
+
+    #[test]
+    fn help_overlay_scrolls_when_the_offset_exceeds_the_viewport() {
+        let mut app = fixture();
+        app.input = Input::Help;
+        // A tall offset that the renderer must clamp to the visible window.
+        for _ in 0..100 {
+            app.handle_key(key(KeyCode::End));
+        }
+        let (screen, _) = draw(&app, 100, 12);
+        assert!(screen.contains("Keys"));
     }
 }

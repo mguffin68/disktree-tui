@@ -23,6 +23,7 @@ use ratatui::crossterm::event::{
 use tokio::sync::watch;
 
 use crate::VisMode;
+use crate::help;
 use crate::nav::{self, Direction};
 use crate::tree_view;
 
@@ -93,6 +94,8 @@ pub enum Input {
     },
     /// Review screen for marked paths (`C`).
     Review(ReviewState),
+    /// Keybinding help overlay (`?`).
+    Help,
 }
 
 /// State of the review screen.
@@ -161,6 +164,10 @@ pub struct App {
     pub last_removal: Option<removal::RemovalReport>,
     /// Whether a post-removal auto-rescan has already been triggered.
     rescan_pending: bool,
+    /// First visible row of the help overlay.
+    help_offset: usize,
+    /// Help rows the renderer can show; set each frame.
+    pub help_viewport: Cell<usize>,
 }
 
 struct RunningScan {
@@ -195,6 +202,8 @@ impl App {
             marked: HashSet::new(),
             last_removal: None,
             rescan_pending: false,
+            help_offset: 0,
+            help_viewport: Cell::new(0),
         }
     }
 
@@ -593,6 +602,10 @@ impl App {
                 }
                 return Action::Continue;
             }
+            Input::Help => {
+                self.help_key(key);
+                return Action::Continue;
+            }
             Input::None => {}
         }
         if matches!(self.state, State::Scanning { .. }) {
@@ -608,6 +621,7 @@ impl App {
         let tree_view = !self.view_area.get().is_some_and(|a| a.treemap);
         match key.code {
             KeyCode::Char('q' | 'Q') => return Action::Quit,
+            KeyCode::Char('?') | KeyCode::F(1) => self.open_help(),
             KeyCode::Char('o') if ctrl => {
                 self.input = Input::Path(self.view.display().to_string());
             }
@@ -676,6 +690,46 @@ impl App {
             _ => {}
         }
         Action::Continue
+    }
+
+    /// Open the keybinding help overlay, reset to the top.
+    fn open_help(&mut self) {
+        self.help_offset = 0;
+        self.input = Input::Help;
+    }
+
+    /// First visible row of the help overlay.
+    pub fn help_offset(&self) -> usize {
+        self.help_offset
+    }
+
+    /// Handle a key on the help overlay.
+    fn help_key(&mut self, key: KeyEvent) {
+        let rows = help::row_count();
+        // A viewport of zero means the overlay has not been drawn yet; treat it
+        // as one row so the offset stays bounded.
+        let viewport = self.help_viewport.get().max(1);
+        let max = rows.saturating_sub(viewport);
+        match key.code {
+            KeyCode::Char('q' | 'Q' | '?') | KeyCode::Esc | KeyCode::F(1) | KeyCode::Enter => {
+                self.input = Input::None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.help_offset = self.help_offset.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.help_offset = (self.help_offset + 1).min(max);
+            }
+            KeyCode::PageUp => {
+                self.help_offset = self.help_offset.saturating_sub(viewport);
+            }
+            KeyCode::PageDown => {
+                self.help_offset = (self.help_offset + viewport).min(max);
+            }
+            KeyCode::Home => self.help_offset = 0,
+            KeyCode::End => self.help_offset = max,
+            _ => {}
+        }
     }
 
     /// Handle a key on the review screen. Returns whether to close the screen.
@@ -1645,5 +1699,50 @@ mod tests {
         assert_eq!(report.freed_bytes, 1000);
         assert!(app.marked.is_empty());
         assert!(app.rescan_pending, "a rescan follows the removal");
+    }
+
+    #[test]
+    fn help_opens_on_question_mark() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char('?')]);
+        assert!(matches!(app.input, Input::Help));
+    }
+
+    #[test]
+    fn help_swallows_other_keys() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Char('?')]);
+        press(&mut app, &[KeyCode::Char('x')]);
+        assert!(matches!(app.input, Input::Help));
+        assert!(app.marked.is_empty(), "keys do not leak to marking");
+    }
+
+    #[test]
+    fn help_esc_closes_without_navigating() {
+        let mut app = fixture();
+        press(&mut app, &[KeyCode::Enter]); // open /r/big
+        let view = app.view_path().to_path_buf();
+        press(&mut app, &[KeyCode::Char('?')]);
+        assert!(matches!(app.input, Input::Help));
+        press(&mut app, &[KeyCode::Esc]);
+        assert!(matches!(app.input, Input::None));
+        assert_eq!(app.view_path(), view, "Esc closed help, did not go up");
+    }
+
+    #[test]
+    fn help_scrolls_within_bounds() {
+        let mut app = fixture();
+        app.help_viewport.set(5);
+        let max = help::row_count() - 5;
+        press(&mut app, &[KeyCode::Char('?')]);
+        assert_eq!(app.help_offset(), 0);
+        press(&mut app, &[KeyCode::Char('k')]);
+        assert_eq!(app.help_offset(), 0, "does not scroll above the top");
+        app.handle_key(key(KeyCode::End));
+        assert_eq!(app.help_offset(), max);
+        press(&mut app, &[KeyCode::Char('j')]);
+        assert_eq!(app.help_offset(), max, "does not scroll past the end");
+        app.handle_key(key(KeyCode::Home));
+        assert_eq!(app.help_offset(), 0);
     }
 }

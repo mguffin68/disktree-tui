@@ -275,7 +275,7 @@
 - [ ] Implement configuration file (`~/.config/disktree-tui/config.toml`):
   - [ ] Default mode, apparent size, hidden toggle, depth, theme
   - [ ] Optional class color overrides
-- [ ] Add `?` key binding: show all keybindings in a help overlay
+- [x] Add `?` key binding: show all keybindings in a help overlay (see `HELP_OVERLAY_PLAN.md`)
 - [ ] Implement Windows-specific features:
   - [ ] NTFS allocation-aware size reporting
   - [ ] MFT scanning for whole disk (admin mode)
